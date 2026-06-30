@@ -502,7 +502,13 @@ def build_status_df(baselines: pd.DataFrame, current: pd.DataFrame, league_name:
                     "STATUS":     status,
                 })
 
-    return pd.DataFrame(rows) if rows else pd.DataFrame()
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    # Drop players where every market is REMOVED — they're scratched/pulled
+    # and should not appear anywhere or count against availability %s
+    active = df.groupby("PLAYERNAME")["STATUS"].apply(lambda s: not (s == "REMOVED").all())
+    return df[df["PLAYERNAME"].isin(active[active].index)]
 
 STATUS_COLOR = {"LIVE": "#16a34a", "MISSING": "#dc2626", "REMOVED": "#b45309"}
 
