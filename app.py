@@ -113,6 +113,12 @@ MLB_PITCHER_MARKETS = {
     "Outs O/U",
     "Win Probability",
 }
+
+# Default markets expected for any batter in the lineup with no prior history
+MLB_DEFAULT_BATTER_MARKETS = [
+    m for m in MLB_ALLOWED_MARKETS
+    if m not in MLB_PITCHER_MARKETS
+]
 DEFAULT_GROUPS   = ["Balanced", "Milestones"]
 DETAIL_DEFAULT_GROUPS = ["Balanced", "Milestones"]
 
@@ -685,15 +691,30 @@ def build_status_df(baselines: pd.DataFrame, current: pd.DataFrame, league_name:
     if is_mlb and player_info is not None and not current.empty:
         covered = {r["PLAYERNAME"] for r in rows}
         roster_players = set(player_info["PLAYERNAME"].tolist())
+        players_in_current = set(current["PLAYERNAME"].unique())
         for player in roster_players - covered:
             player_current = current[current["PLAYERNAME"] == player]
-            for _, crow in player_current.iterrows():
-                grp = classify_market(crow["MARKETTYPENAME"])
-                if grp == "Exclude" or crow["MARKETTYPENAME"] not in MLB_ALLOWED_MARKETS:
-                    continue
-                status = "LIVE" if crow["IS_LIVE"] == 1 else "REMOVED"
-                rows.append({"PLAYERNAME": player, "MARKET": crow["MARKETTYPENAME"],
-                              "GROUP": grp, "LAST_GAME": "roster", "STATUS": status})
+            if not player_current.empty:
+                # Has some current markets — show them as-is
+                for _, crow in player_current.iterrows():
+                    grp = classify_market(crow["MARKETTYPENAME"])
+                    if grp == "Exclude" or crow["MARKETTYPENAME"] not in MLB_ALLOWED_MARKETS:
+                        continue
+                    status = "LIVE" if crow["IS_LIVE"] == 1 else "REMOVED"
+                    rows.append({"PLAYERNAME": player, "MARKET": crow["MARKETTYPENAME"],
+                                  "GROUP": grp, "LAST_GAME": "roster", "STATUS": status})
+            else:
+                # No current markets at all — show expected batter markets as MISSING
+                # so traders know to post them
+                pos = player_info.loc[player_info["PLAYERNAME"] == player, "POSITION"].values
+                is_pitcher = len(pos) > 0 and "pitcher" in str(pos[0]).lower()
+                if not is_pitcher:
+                    for mkt in MLB_DEFAULT_BATTER_MARKETS:
+                        grp = classify_market(mkt)
+                        if grp in ("Exclude",):
+                            continue
+                        rows.append({"PLAYERNAME": player, "MARKET": mkt,
+                                      "GROUP": grp, "LAST_GAME": "roster", "STATUS": "MISSING"})
 
     if not rows:
         return pd.DataFrame()
@@ -707,11 +728,18 @@ def build_status_df(baselines: pd.DataFrame, current: pd.DataFrame, league_name:
         players_without_individual = set(df["PLAYERNAME"].unique()) - set(individual["PLAYERNAME"].unique())
         df = df[df["PLAYERNAME"].isin(keep | players_without_individual)]
 
-    # For MLB: also drop players with zero live markets — lineup scratch whose baseline
-    # predates the roster change (all markets show as MISSING, none were ever posted today)
+    # For MLB: drop players with zero live markets ONLY if they came from a baseline
+    # (scratched from lineup). Roster-fallback players ("roster" in LAST_GAME) should
+    # always show — they're confirmed in today's lineup.
     if is_mlb and not df.empty:
-        has_any_live = df.groupby("PLAYERNAME")["STATUS"].apply(lambda s: (s == "LIVE").any())
-        df = df[df["PLAYERNAME"].isin(has_any_live[has_any_live].index)]
+        roster_fallback_players = set(df[df["LAST_GAME"] == "roster"]["PLAYERNAME"].unique())
+        baseline_players = set(df[df["LAST_GAME"] != "roster"]["PLAYERNAME"].unique())
+        if baseline_players:
+            has_any_live = df[df["PLAYERNAME"].isin(baseline_players)].groupby("PLAYERNAME")["STATUS"].apply(
+                lambda s: (s == "LIVE").any()
+            )
+            drop = set(has_any_live[~has_any_live].index)
+            df = df[~df["PLAYERNAME"].isin(drop)]
 
     # For MLB: split Balanced/Milestones into Batter/Pitcher sub-groups
     if is_mlb and not df.empty:
