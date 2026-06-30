@@ -53,6 +53,8 @@ def classify_market(name: str) -> str:
         return "Exclude"
     if "team first" in n:
         return "Team"
+    if "h2h ml" in n:
+        return "Exclude"
     if "h2h" in n or n.startswith("most "):
         return "H2H"
     if "milestone" in n:
