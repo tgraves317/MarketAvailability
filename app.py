@@ -718,6 +718,9 @@ def build_status_df(baselines: pd.DataFrame, current: pd.DataFrame, league_name:
                 return "Pitcher Balanced" if is_pitcher else "Batter Balanced"
             if row["GROUP"] == "Milestones":
                 return "Pitcher Milestones" if is_pitcher else "Batter Milestones"
+            # (X or Fewer) markets classify as "Other" — treat as Pitcher Milestones
+            if row["GROUP"] == "Other" and is_pitcher:
+                return "Pitcher Milestones"
             return row["GROUP"]
         df["GROUP"] = df.apply(mlb_group, axis=1)
 
