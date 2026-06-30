@@ -313,6 +313,224 @@ def get_activity_feed(event_id: str, minutes: int = 30) -> pd.DataFrame:
         ORDER BY d.CHANGED_AT DESC
     """)
 
+# ── Competitor comparison ─────────────────────────────────────────────────────
+
+# Odds API market key → DK market type name
+WNBA_MARKET_MAP = {
+    "player_points":                  "Points O/U",
+    "player_rebounds":                "Rebounds O/U",
+    "player_assists":                 "Assists O/U",
+    "player_threes":                  "Three Pointers Made O/U",
+    "player_points_rebounds":         "Points + Rebounds O/U",
+    "player_points_assists":          "Points + Assists O/U",
+    "player_rebounds_assists":        "Rebounds + Assists O/U",
+    "player_points_rebounds_assists": "Points + Rebounds + Assists O/U",
+    "player_double_double":           "Double-Double",
+    "player_triple_double":           "Triple-Double",
+}
+
+MLB_MARKET_MAP = {
+    "batter_hits":          "Hits O/U",
+    "batter_total_bases":   "Total Bases O/U",
+    "batter_rbis":          "RBIs O/U",
+    "batter_home_runs":     "Home Runs O/U",
+    "batter_stolen_bases":  "Stolen Bases O/U",
+    "batter_singles":       "Singles O/U",
+    "batter_doubles":       "Doubles O/U",
+    "batter_triples":       "Triples O/U",
+    "batter_strikeouts":    "Strikeouts O/U",
+    "batter_walks":         "Walks (Batter) O/U",
+    "batter_runs_scored":   "Runs (Batter) O/U",
+    "batter_hits_runs_rbis":"Hits + Runs + RBIs O/U",
+    "pitcher_strikeouts":   "Strikeouts Thrown O/U",
+    "pitcher_outs":         "Outs O/U",
+    "pitcher_hits_allowed": "Hits Allowed O/U",
+    "pitcher_walks":        "Walks Allowed O/U",
+    "pitcher_earned_runs":  "Earned Runs Allowed O/U",
+}
+
+PRICE_DIFF_THRESHOLD = 20  # American odds points
+
+def prob_to_american(p: float) -> int:
+    p = max(min(p, 0.9999), 0.0001)
+    if p >= 0.5:
+        return round(-(p / (1 - p)) * 100)
+    return round(((1 - p) / p) * 100)
+
+def american_to_prob(a: int) -> float:
+    if a < 0:
+        return (-a) / (-a + 100)
+    return 100 / (a + 100)
+
+@st.cache_data(ttl=60, show_spinner=False)
+def get_dk_prices(event_id: str) -> pd.DataFrame:
+    """DK's current Over/Under prices per player/market."""
+    return run_query(f"""
+        SELECT DISTINCT
+            mp.PLAYERNAME,
+            m.MARKETTYPENAME,
+            s.SELECTIONNAME,
+            s.POINTS,
+            s.LASTPROBABILITY
+        FROM SPORTSCONTENT.DBO.SELECTIONS s
+        JOIN SPORTSCONTENT.DBO.MARKETS m ON m.MARKETID = s.MARKETID AND m.EVENTID = '{event_id}'
+        JOIN SPORTSCONTENT.DBO.MARKETSPLAYERS_GLOBAL mp ON mp.MARKETID = s.MARKETID AND mp.EVENTID = '{event_id}'
+        WHERE s.EVENTID = '{event_id}'
+          AND s.ISREMOVED = FALSE
+          AND m.ISREMOVED = FALSE
+          AND s.LASTPROBABILITY > 0
+        QUALIFY ROW_NUMBER() OVER (
+            PARTITION BY mp.PLAYERNAME, m.MARKETTYPENAME, s.SELECTIONNAME
+            ORDER BY s.LASTMESSAGETIMESTAMP DESC
+        ) = 1
+    """)
+
+@st.cache_data(ttl=60, show_spinner=False)
+def get_competitor_prices(event_id: str, league_name: str,
+                          home_team: str, away_team: str) -> pd.DataFrame:
+    """
+    Fetch competitor player prop prices from Odds API.
+    Returns DataFrame with PLAYERNAME, DK_MARKET, SIDE, LINE, AMERICAN_ODDS.
+    """
+    import urllib.request, json
+
+    api_key = st.secrets["odds_api"]["key"]
+    is_wnba = "wnba" in league_name.lower()
+
+    sport      = "basketball_wnba" if is_wnba else "baseball_mlb"
+    bookmaker  = "fanduel"          if is_wnba else "fanatics"
+    market_map = WNBA_MARKET_MAP    if is_wnba else MLB_MARKET_MAP
+    markets_str = ",".join(market_map.keys())
+
+    # Find matching Odds API event by team name similarity
+    try:
+        req = urllib.request.urlopen(
+            f"https://api.the-odds-api.com/v4/sports/{sport}/events/?apiKey={api_key}",
+            timeout=10
+        )
+        events = json.loads(req.read())
+    except Exception:
+        return pd.DataFrame()
+
+    # Match by checking if either team name appears in the other
+    def team_match(t1: str, t2: str) -> bool:
+        t1, t2 = t1.lower(), t2.lower()
+        t1_last = t1.split()[-1]
+        t2_last = t2.split()[-1]
+        return t1_last in t2 or t2_last in t1
+
+    odds_event = None
+    for ev in events:
+        if (team_match(home_team, ev["home_team"]) or team_match(home_team, ev["away_team"])) and \
+           (team_match(away_team, ev["home_team"]) or team_match(away_team, ev["away_team"])):
+            odds_event = ev
+            break
+
+    if not odds_event:
+        return pd.DataFrame()
+
+    try:
+        url = (f"https://api.the-odds-api.com/v4/sports/{sport}/events/{odds_event['id']}/odds"
+               f"?apiKey={api_key}&regions=us&bookmakers={bookmaker}"
+               f"&markets={markets_str}&oddsFormat=american")
+        req = urllib.request.urlopen(url, timeout=10)
+        data = json.loads(req.read())
+    except Exception:
+        return pd.DataFrame()
+
+    rows = []
+    for bk in data.get("bookmakers", []):
+        if bk["key"] != bookmaker:
+            continue
+        for mkt in bk["markets"]:
+            dk_market = market_map.get(mkt["key"])
+            if not dk_market:
+                continue
+            for outcome in mkt["outcomes"]:
+                rows.append({
+                    "PLAYERNAME":   outcome["description"],
+                    "DK_MARKET":    dk_market,
+                    "SIDE":         outcome["name"],   # Over / Under / Yes / No
+                    "LINE":         outcome.get("point"),
+                    "AMERICAN_ODDS": int(outcome["price"]),
+                })
+
+    return pd.DataFrame(rows) if rows else pd.DataFrame()
+
+def build_competitor_comparison(dk_prices: pd.DataFrame,
+                                comp_prices: pd.DataFrame,
+                                league_name: str) -> dict:
+    """
+    Returns dict with:
+      - missing_on_dk:  markets competitor has but DK doesn't
+      - missing_on_comp: markets DK has but competitor doesn't
+      - price_gaps:     same market/player/line but odds differ >= threshold
+    """
+    result = {"missing_on_dk": [], "missing_on_comp": [], "price_gaps": []}
+    if comp_prices.empty:
+        return result
+
+    is_wnba    = "wnba" in league_name.lower()
+    bookmaker  = "FanDuel" if is_wnba else "Fanatics"
+    dk_markets = WNBA_MARKET_MAP if is_wnba else MLB_MARKET_MAP
+
+    # Build DK lookup: (player, market, side) → (line, american_odds)
+    dk_lookup = {}
+    if not dk_prices.empty:
+        for _, row in dk_prices.iterrows():
+            side = str(row["SELECTIONNAME"]).split()[0]  # "Over" or "Under"
+            american = prob_to_american(float(row["LASTPROBABILITY"]))
+            key = (row["PLAYERNAME"], row["MARKETTYPENAME"], side)
+            dk_lookup[key] = (row["POINTS"], american)
+
+    # DK player+market set (live markets only from dk_prices)
+    dk_set = {(r["PLAYERNAME"], r["MARKETTYPENAME"]) for _, r in dk_prices.iterrows()} if not dk_prices.empty else set()
+
+    # Competitor player+market set
+    comp_set = {(r["PLAYERNAME"], r["DK_MARKET"]) for _, r in comp_prices.iterrows()}
+
+    # Missing on DK — competitor has it, DK doesn't
+    for player, market in sorted(comp_set - dk_set):
+        result["missing_on_dk"].append({"PLAYERNAME": player, "MARKET": market, "SOURCE": bookmaker})
+
+    # Missing on competitor — DK has it, competitor doesn't (only for mapped markets)
+    dk_mapped_set = {(p, m) for p, m in dk_set if m in dk_markets.values()}
+    for player, market in sorted(dk_mapped_set - comp_set):
+        result["missing_on_comp"].append({"PLAYERNAME": player, "MARKET": market, "SOURCE": bookmaker})
+
+    # Price gaps
+    for _, crow in comp_prices.iterrows():
+        key = (crow["PLAYERNAME"], crow["DK_MARKET"], crow["SIDE"])
+        if key not in dk_lookup:
+            continue
+        dk_line, dk_american = dk_lookup[key]
+        comp_american = crow["AMERICAN_ODDS"]
+        comp_line     = crow["LINE"]
+
+        # Flag if line differs
+        line_diff = abs(float(dk_line or 0) - float(comp_line or 0)) if dk_line and comp_line else 0
+
+        # Flag if price differs by threshold
+        price_diff = abs(dk_american - comp_american)
+
+        if price_diff >= PRICE_DIFF_THRESHOLD or line_diff >= 0.5:
+            result["price_gaps"].append({
+                "PLAYERNAME":   crow["PLAYERNAME"],
+                "MARKET":       crow["DK_MARKET"],
+                "SIDE":         crow["SIDE"],
+                "DK_LINE":      dk_line,
+                "DK_ODDS":      dk_american,
+                "COMP_LINE":    comp_line,
+                "COMP_ODDS":    comp_american,
+                "LINE_DIFF":    line_diff,
+                "PRICE_DIFF":   price_diff,
+                "SOURCE":       bookmaker,
+            })
+
+    # Sort price gaps by biggest difference first
+    result["price_gaps"].sort(key=lambda x: -x["PRICE_DIFF"])
+    return result
+
 # ── Build helpers ─────────────────────────────────────────────────────────────
 
 def build_status_df(baselines: pd.DataFrame, current: pd.DataFrame, league_name: str,
@@ -756,6 +974,77 @@ def show_detail(event_row, league_name):
                     "  —  <span style='color:#9ca3af'>" + row["ISSUE"] + "</span></div>",
                     unsafe_allow_html=True,
                 )
+
+    # ── Competitor comparison ────────────────────────────────────────────────
+    is_wnba    = "wnba" in league_name.lower()
+    bookmaker  = "FanDuel" if is_wnba else "Fanatics"
+    pi         = get_player_info(event_row["EVENTID"])
+    home_team  = pi[pi["TEAM_ORDER"] == 0]["TEAM"].iloc[0] if not pi.empty else ""
+    away_team  = pi[pi["TEAM_ORDER"] == 1]["TEAM"].iloc[0] if not pi.empty else ""
+
+    try:
+        dk_prices   = get_dk_prices(event_row["EVENTID"])
+        comp_prices = get_competitor_prices(
+            event_row["EVENTID"], league_name, home_team, away_team
+        )
+        comparison  = build_competitor_comparison(dk_prices, comp_prices, league_name)
+    except Exception:
+        comparison = {"missing_on_dk": [], "missing_on_comp": [], "price_gaps": []}
+
+    n_missing_dk   = len(comparison["missing_on_dk"])
+    n_price_gaps   = len(comparison["price_gaps"])
+
+    if n_missing_dk > 0 or n_price_gaps > 0:
+        with st.expander(
+            f"🔍 vs {bookmaker}  —  "
+            f"{n_missing_dk} markets they have that we don't  ·  "
+            f"{n_price_gaps} price gaps ≥20¢",
+            expanded=True
+        ):
+            if comparison["missing_on_dk"]:
+                st.markdown(
+                    "<div style='font-size:0.72em;text-transform:uppercase;letter-spacing:0.08em;"
+                    "color:#f87171;font-weight:700;margin-bottom:6px'>"
+                    f"{bookmaker} has, DK doesn't</div>",
+                    unsafe_allow_html=True,
+                )
+                for item in comparison["missing_on_dk"]:
+                    st.markdown(
+                        "<div style='padding:3px 0;font-size:0.85em'>"
+                        "<span style='color:#f87171;font-weight:600'>" + item["PLAYERNAME"] + "</span>"
+                        "  —  <span style='color:#e5e7eb'>" + item["MARKET"] + "</span>"
+                        "</div>",
+                        unsafe_allow_html=True,
+                    )
+
+            if comparison["price_gaps"]:
+                st.markdown(
+                    "<div style='font-size:0.72em;text-transform:uppercase;letter-spacing:0.08em;"
+                    "color:#fbbf24;font-weight:700;margin:12px 0 6px'>"
+                    "Price gaps ≥20¢</div>",
+                    unsafe_allow_html=True,
+                )
+                for item in comparison["price_gaps"]:
+                    dk_str   = f"{item['DK_ODDS']:+d}"
+                    comp_str = f"{item['COMP_ODDS']:+d}"
+                    line_str = (f" @ {item['DK_LINE']} vs {item['COMP_LINE']}"
+                                if item["LINE_DIFF"] >= 0.5 else
+                                f" @ {item['DK_LINE']}")
+                    diff_color = "#f87171" if item["PRICE_DIFF"] >= 30 else "#fbbf24"
+                    st.markdown(
+                        "<div style='padding:3px 0;font-size:0.85em;display:flex;gap:12px'>"
+                        "<span style='color:#e5e7eb;min-width:160px;font-weight:600'>"
+                        + item["PLAYERNAME"] + "</span>"
+                        "<span style='color:#9ca3af;min-width:200px'>"
+                        + item["MARKET"] + " " + item["SIDE"] + line_str + "</span>"
+                        "<span style='color:#16a34a'>DK " + dk_str + "</span>"
+                        "<span style='color:#6b7280'>vs</span>"
+                        "<span style='color:" + diff_color + "'>" + bookmaker + " " + comp_str + "</span>"
+                        "<span style='color:" + diff_color + ";font-weight:700'>"
+                        "(" + str(item["PRICE_DIFF"]) + "¢)</span>"
+                        "</div>",
+                        unsafe_allow_html=True,
+                    )
 
     st.divider()
 
