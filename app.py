@@ -84,6 +84,8 @@ def classify_market(name: str) -> str:
         return "H2H"
     if "milestone" in n:
         return "Milestones"
+    if n == "win probability":
+        return "Balanced"
     if (
         " o/u" in n
         or "double-double" in n
@@ -109,6 +111,7 @@ MLB_PITCHER_MARKETS = {
     "Hits Allowed + Walks Allowed + Earned Runs Allowed O/U",
     "Hits Allowed + Walks Allowed + Earned Runs Allowed (X or Fewer)",
     "Outs O/U",
+    "Win Probability",
 }
 DEFAULT_GROUPS   = ["Balanced", "Milestones"]
 DETAIL_DEFAULT_GROUPS = ["Balanced", "Milestones"]
@@ -816,6 +819,7 @@ def market_short(name: str) -> str:
         ("1st Points Scorer", "1st Pts"), ("Player First Field Goal Made Type", "1st FG Type"),
         ("1st Batter to Strike Out", "1st K"), ("1st Stolen Base", "1st SB"),
         ("1st Hit", "1st Hit"), ("Hits Allowed (X or Fewer)", "H Allow"), ("Hits Allowed", "HA"),
+        ("Win Probability", "To Record A Win"),
     ]
     out = name
     for old, new in replacements:
