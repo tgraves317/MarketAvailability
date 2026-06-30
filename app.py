@@ -504,10 +504,19 @@ def build_status_df(baselines: pd.DataFrame, current: pd.DataFrame, league_name:
     if not rows:
         return pd.DataFrame()
     df = pd.DataFrame(rows)
-    # Drop players where every market is REMOVED — they're scratched/pulled
-    # and should not appear anywhere or count against availability %s
-    active = df.groupby("PLAYERNAME")["STATUS"].apply(lambda s: not (s == "REMOVED").all())
-    return df[df["PLAYERNAME"].isin(active[active].index)]
+    # Drop players where every individual stat market (O/U + Milestones, excluding
+    # scorer/team markets like 1st Points Scorer) is REMOVED — signals player ruled out
+    SCORER_MARKETS = {"1st Points Scorer", "Player First Field Goal Made Type"}
+    individual = df[~df["MARKET"].isin(SCORER_MARKETS) & df["GROUP"].isin(["Balanced", "Milestones"])]
+    if not individual.empty:
+        all_removed = individual.groupby("PLAYERNAME")["STATUS"].apply(lambda s: (s == "REMOVED").all())
+        keep = set(all_removed[~all_removed].index)
+        # Also keep players who have no individual markets at all (e.g. only scorer markets)
+        players_with_individual = set(individual["PLAYERNAME"].unique())
+        players_without_individual = set(df["PLAYERNAME"].unique()) - players_with_individual
+        keep = keep | players_without_individual
+        df = df[df["PLAYERNAME"].isin(keep)]
+    return df
 
 STATUS_COLOR = {"LIVE": "#16a34a", "MISSING": "#dc2626", "REMOVED": "#b45309"}
 
