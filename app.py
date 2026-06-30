@@ -548,12 +548,10 @@ def build_competitor_comparison(dk_prices: pd.DataFrame,
         if line_diff >= LINE_DIFF_THRESHOLD:
             result["line_diffs"].append(gap)
 
-    # Price gaps = same-line gaps above threshold, one row per player+market
-    pct_threshold_val = PRICE_DIFF_THRESHOLD * 100  # convert 0.04 → 4.0
+    # Store all same-line gaps — slider in UI handles the threshold filter
     for gap in best_gap.values():
-        # Clean up internal key before storing
         gap.pop("_raw_prob_diff", None)
-        if gap["LINE_DIFF"] < LINE_DIFF_THRESHOLD and gap["PROB_DIFF"] >= pct_threshold_val:
+        if gap["LINE_DIFF"] < LINE_DIFF_THRESHOLD:
             result["price_gaps"].append(gap)
 
     result["price_gaps"].sort(key=lambda x: -x["PROB_DIFF"])
