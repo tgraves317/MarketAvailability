@@ -713,6 +713,14 @@ OU_MILESTONE_PAIRS = {
 }
 
 def get_pairing_flags(df: pd.DataFrame) -> tuple:
+    # These markets routinely get milestones before O/U lines in MLB workflow —
+    # suppress the FYI direction (milestone up, line missing) to reduce noise
+    FYI_SUPPRESS = {
+        "Triples O/U",
+        "Runs + RBIs O/U",
+        "Strikeouts O/U",
+    }
+
     if df.empty:
         return pd.DataFrame(), pd.DataFrame()
     status_map = df.groupby(["PLAYERNAME", "MARKET"])["STATUS"].first().to_dict()
@@ -730,7 +738,7 @@ def get_pairing_flags(df: pd.DataFrame) -> tuple:
             if ou_s == "LIVE" and mile_s != "LIVE":
                 urgent.append({"PLAYERNAME": player,
                                 "ISSUE": f"{ou_short} ✓ → {mile_short} {mile_s or 'not posted'}"})
-            elif mile_s == "LIVE" and ou_s != "LIVE":
+            elif mile_s == "LIVE" and ou_s != "LIVE" and ou not in FYI_SUPPRESS:
                 fyi.append({"PLAYERNAME": player,
                              "ISSUE": f"{mile_short} ✓ → {ou_short} {ou_s or 'not posted'}"})
     return (pd.DataFrame(urgent) if urgent else pd.DataFrame(),
