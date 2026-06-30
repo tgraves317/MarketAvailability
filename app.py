@@ -734,11 +734,23 @@ def compute_group_pcts(baselines: pd.DataFrame, current: pd.DataFrame, league_na
     if df.empty:
         return {}
     result = {}
-    for grp in DEFAULT_GROUPS:  # Only Balanced + Milestones for overview
-        grp_df = df[df["GROUP"] == grp]
-        if grp_df.empty:
-            continue
-        result[grp] = (int((grp_df["STATUS"] == "LIVE").sum()), int(len(grp_df)))
+    is_mlb = "mlb" in league_name.lower()
+    if is_mlb:
+        # Combine batter+pitcher sub-groups back into Balanced and Milestones for overview %
+        for label, sub_groups in [
+            ("Balanced",   ["Batter Balanced",   "Pitcher Balanced"]),
+            ("Milestones", ["Batter Milestones",  "Pitcher Milestones"]),
+        ]:
+            grp_df = df[df["GROUP"].isin(sub_groups)]
+            if grp_df.empty:
+                continue
+            result[label] = (int((grp_df["STATUS"] == "LIVE").sum()), int(len(grp_df)))
+    else:
+        for grp in DEFAULT_GROUPS:
+            grp_df = df[df["GROUP"] == grp]
+            if grp_df.empty:
+                continue
+            result[grp] = (int((grp_df["STATUS"] == "LIVE").sum()), int(len(grp_df)))
     return result
 
 # O/U ↔ Milestone/XorFewer pairing
