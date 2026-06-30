@@ -996,82 +996,86 @@ def render_competitor_section(event_id: str, league_name: str, player_info: pd.D
             "</div>"
         )
 
-    # Two columns: left = missing + arbs, right = price gaps + line diffs
-    left_col, right_col = st.columns(2)
-
-    with left_col:
-        if comparison["arbs"]:
-            st.markdown(
-                "<div style='font-size:0.68em;text-transform:uppercase;letter-spacing:0.08em;"
-                "color:#a78bfa;font-weight:700;margin:8px 0 4px'>⚡ Arbs</div>",
+    # ── Arbs — full width ────────────────────────────────────────────────────
+    if comparison["arbs"]:
+        st.markdown(
+            "<div style='font-size:0.68em;text-transform:uppercase;letter-spacing:0.08em;"
+            "color:#a78bfa;font-weight:700;margin:8px 0 4px'>⚡ Arbs</div>",
+            unsafe_allow_html=True,
+        )
+        arb_cols = st.columns(2)
+        for i, item in enumerate(comparison["arbs"]):
+            line_str = f"@ {item['LINE']}" if item["LINE"] else ""
+            arb_cols[i % 2].markdown(
+                row_html(
+                    item["PLAYERNAME"], item["MARKET"], line_str,
+                    f"{item['DK_ODDS']:+d} {item['DK_SIDE']}",
+                    bookmaker, f"{item['COMP_ODDS']:+d} {item['COMP_SIDE']}",
+                    badge=f"+{item['PROFIT_PCT']}%", badge_color="#a78bfa"
+                ),
                 unsafe_allow_html=True,
             )
-            for item in comparison["arbs"]:
-                line_str = f"@ {item['LINE']}" if item["LINE"] else ""
-                st.markdown(
-                    row_html(
-                        item["PLAYERNAME"], item["MARKET"], line_str,
-                        f"{item['DK_ODDS']:+d} {item['DK_SIDE']}",
-                        bookmaker, f"{item['COMP_ODDS']:+d} {item['COMP_SIDE']}",
-                        badge=f"+{item['PROFIT_PCT']}%", badge_color="#a78bfa"
-                    ),
-                    unsafe_allow_html=True,
-                )
 
-        if comparison["missing_on_dk"]:
-            st.markdown(
-                "<div style='font-size:0.68em;text-transform:uppercase;letter-spacing:0.08em;"
-                "color:#f87171;font-weight:700;margin:8px 0 4px'>🚨 " + bookmaker + " has, DK doesn't</div>",
+    # ── Missing — full width, prominent ──────────────────────────────────────
+    if comparison["missing_on_dk"]:
+        st.markdown(
+            "<div style='font-size:0.8em;font-weight:700;color:#f87171;margin:12px 0 6px'>"
+            "🚨 " + bookmaker + " has, DK doesn't</div>",
+            unsafe_allow_html=True,
+        )
+        missing_sorted = sorted(comparison["missing_on_dk"], key=lambda x: (x["MARKET"], x["PLAYERNAME"]))
+        miss_cols = st.columns(2)
+        for i, item in enumerate(missing_sorted):
+            miss_cols[i % 2].markdown(
+                "<div style='display:flex;gap:12px;align-items:center;padding:5px 0;"
+                "border-bottom:1px solid #1e293b;font-size:0.88em'>"
+                "<span style='color:#fca5a5;font-weight:700;min-width:140px'>" + item["PLAYERNAME"] + "</span>"
+                "<span style='color:#f87171;font-weight:600'>" + market_short(item["MARKET"]) + "</span>"
+                "</div>",
                 unsafe_allow_html=True,
             )
-            for item in sorted(comparison["missing_on_dk"], key=lambda x: (x["MARKET"], x["PLAYERNAME"])):
-                st.markdown(
-                    "<div style='display:grid;grid-template-columns:140px 1fr;gap:8px;"
-                    "align-items:center;padding:4px 0;border-bottom:1px solid #1e293b;font-size:0.82em'>"
-                    "<span style='color:#fca5a5;font-weight:700'>" + item["PLAYERNAME"] + "</span>"
-                    "<span style='color:#f87171'>" + market_short(item["MARKET"]) + "</span>"
-                    "</div>",
-                    unsafe_allow_html=True,
-                )
 
-    with right_col:
-        if filtered_gaps:
-            st.markdown(
-                f"<div style='font-size:0.68em;text-transform:uppercase;letter-spacing:0.08em;"
-                f"color:#fbbf24;font-weight:700;margin:8px 0 4px'>Price gaps ≥{pct_threshold}%</div>",
+    # ── Price gaps — two columns ──────────────────────────────────────────────
+    if filtered_gaps:
+        st.markdown(
+            f"<div style='font-size:0.68em;text-transform:uppercase;letter-spacing:0.08em;"
+            f"color:#fbbf24;font-weight:700;margin:12px 0 4px'>Price gaps ≥{pct_threshold}%</div>",
+            unsafe_allow_html=True,
+        )
+        gap_cols = st.columns(2)
+        for i, item in enumerate(filtered_gaps):
+            line_str   = f"@ {item['LINE']}" if item["LINE"] else ""
+            diff_color = "#f87171" if item["PROB_DIFF"] >= 6 else "#fbbf24"
+            gap_cols[i % 2].markdown(
+                row_html(
+                    item["PLAYERNAME"], item["MARKET"],
+                    item["SIDE"] + " " + line_str,
+                    f"{item['DK_ODDS']:+d}", bookmaker, f"{item['COMP_ODDS']:+d}",
+                    badge=f"({item['PROB_DIFF']}%)", badge_color=diff_color
+                ),
                 unsafe_allow_html=True,
             )
-            for item in filtered_gaps:
-                line_str   = f"@ {item['LINE']}" if item["LINE"] else ""
-                diff_color = "#f87171" if item["PROB_DIFF"] >= 6 else "#fbbf24"
-                st.markdown(
-                    row_html(
-                        item["PLAYERNAME"], item["MARKET"],
-                        item["SIDE"] + " " + line_str,
-                        f"{item['DK_ODDS']:+d}", bookmaker, f"{item['COMP_ODDS']:+d}",
-                        badge=f"({item['PROB_DIFF']}%)", badge_color=diff_color
-                    ),
-                    unsafe_allow_html=True,
-                )
 
-        if show_line_diffs and comparison["line_diffs"]:
-            st.markdown(
-                "<div style='font-size:0.68em;text-transform:uppercase;letter-spacing:0.08em;"
-                "color:#6b7280;font-weight:700;margin:12px 0 4px'>Different lines</div>",
+    # ── Line diffs — two columns, hidden by default ───────────────────────────
+    if show_line_diffs and comparison["line_diffs"]:
+        st.markdown(
+            "<div style='font-size:0.68em;text-transform:uppercase;letter-spacing:0.08em;"
+            "color:#6b7280;font-weight:700;margin:12px 0 4px'>Different lines</div>",
+            unsafe_allow_html=True,
+        )
+        ld_cols = st.columns(2)
+        for i, item in enumerate(comparison["line_diffs"]):
+            ld_cols[i % 2].markdown(
+                "<div style='display:grid;grid-template-columns:120px 110px 1fr;gap:6px;"
+                "align-items:center;padding:3px 0;border-bottom:1px solid #1e293b;"
+                "font-size:0.78em;color:#6b7280'>"
+                "<span>" + item["PLAYERNAME"] + "</span>"
+                "<span>" + market_short(item["MARKET"]) + " " + item["SIDE"] + "</span>"
+                "<span>DK " + str(item["DK_LINE"]) + " " + f"{item['DK_ODDS']:+d}" +
+                "  vs  " + bookmaker + " " + str(item["COMP_LINE"]) + " " + f"{item['COMP_ODDS']:+d}" + "</span>"
+                "</div>",
                 unsafe_allow_html=True,
             )
-            for item in comparison["line_diffs"]:
-                st.markdown(
-                    "<div style='display:grid;grid-template-columns:140px 130px 1fr;gap:8px;"
-                    "align-items:center;padding:3px 0;border-bottom:1px solid #1e293b;"
-                    "font-size:0.78em;color:#6b7280'>"
-                    "<span>" + item["PLAYERNAME"] + "</span>"
-                    "<span>" + market_short(item["MARKET"]) + " " + item["SIDE"] + "</span>"
-                    "<span>DK " + str(item["DK_LINE"]) + " " + f"{item['DK_ODDS']:+d}" +
-                    "  vs  " + bookmaker + " " + str(item["COMP_LINE"]) + " " + f"{item['COMP_ODDS']:+d}" + "</span>"
-                    "</div>",
-                    unsafe_allow_html=True,
-                )
 
 # ── Page: Detail view ─────────────────────────────────────────────────────────
 
