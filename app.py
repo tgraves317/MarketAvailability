@@ -73,48 +73,33 @@ def classify_market(name: str) -> str:
         return "Balanced"
     return "Other"
 
-GROUP_ORDER    = ["Balanced", "Milestones", "Team", "H2H", "Other"]
+GROUP_ORDER      = ["Balanced", "Milestones", "Team", "H2H", "Other"]
+DEFAULT_GROUPS   = ["Balanced", "Milestones"]
+# Groups shown by default in the detail tabs
+DETAIL_DEFAULT_GROUPS = ["Balanced", "Milestones"]
 
-# Canonical stat ordering for WNBA market completion table.
-# Applied across Balanced, Milestones, and H2H — suffix (O/U, Milestones, H2H …) is stripped for matching.
 WNBA_MARKET_STAT_ORDER = [
-    "Points",
-    "Rebounds",
-    "Assists",
-    "Three Pointers Made",
-    "Points + Rebounds",
-    "Points + Assists",
-    "Rebounds + Assists",
-    "Points + Rebounds + Assists",
-    "Double-Double",
-    "Triple-Double",
-    "1st Points Scorer",
+    "Points", "Rebounds", "Assists", "Three Pointers Made",
+    "Points + Rebounds", "Points + Assists", "Rebounds + Assists",
+    "Points + Rebounds + Assists", "Double-Double", "Triple-Double", "1st Points Scorer",
 ]
 
-# Suffixes to strip before matching the stat base name
-_MARKET_SUFFIXES = [
-    " O/U", " Milestones",
-    " H2H ML", " H2H Spread", " H2H Total",
-]
+_MARKET_SUFFIXES = [" O/U", " Milestones", " H2H ML", " H2H Spread", " H2H Total"]
 
 def _wnba_market_sort_key(market_name: str) -> int:
     base = market_name
-    # Strip trailing suffix (O/U, Milestones, H2H variants)
     for suffix in _MARKET_SUFFIXES:
         if base.endswith(suffix):
             base = base[: -len(suffix)]
             break
-    # Strip leading "Most " for H2H / most-markets (e.g. "Most Points H2H ML" → "Points")
     if base.startswith("Most "):
         base = base[5:]
-    # "Three Pointers" (from "Most Three Pointers") → "Three Pointers Made"
     if base == "Three Pointers":
         base = "Three Pointers Made"
     try:
         return WNBA_MARKET_STAT_ORDER.index(base)
     except ValueError:
         return 99
-DEFAULT_GROUPS = ["Balanced", "Milestones"]
 
 def pct_color(pct: float) -> str:
     if pct >= 0.9: return "#16a34a"
@@ -156,7 +141,6 @@ def run_query(sql: str) -> pd.DataFrame:
         cur.execute(sql)
         return pd.DataFrame(cur.fetchall(), columns=[d[0] for d in cur.description])
     except Exception:
-        # Connection expired — clear the cache and reconnect once
         get_connection.clear()
         conn = get_connection()
         cur  = conn.cursor()
@@ -176,45 +160,51 @@ def get_events(sport_id: str) -> pd.DataFrame:
         ORDER BY e.STARTEVENTDATE
     """)
 
-@st.cache_data(ttl=30, show_spinner=False)
-def get_overview_stats(event_ids: tuple) -> pd.DataFrame:
+@st.cache_data(ttl=1800, show_spinner=False)
+def get_bulk_baselines(event_ids: tuple) -> pd.DataFrame:
     ids_sql = ",".join(f"'{e}'" for e in event_ids)
     return run_query(f"""
-        SELECT mp.EVENTID, m.MARKETTYPENAME, COUNT(DISTINCT mp.PLAYERNAME) AS LIVE_PLAYERS
+        WITH event_players AS (
+            SELECT DISTINCT PLAYERNAME, EVENTID AS TARGET_EVENT
+            FROM SPORTSCONTENT.DBO.MARKETSPLAYERS_GLOBAL
+            WHERE EVENTID IN ({ids_sql})
+        ),
+        recent_player_events AS (
+            SELECT ep.PLAYERNAME, ep.TARGET_EVENT, mp.EVENTID, e.STARTEVENTDATE
+            FROM event_players ep
+            JOIN SPORTSCONTENT.DBO.MARKETSPLAYERS_GLOBAL mp ON mp.PLAYERNAME = ep.PLAYERNAME
+            JOIN SPORTSCONTENT.DBO.EVENTS e ON e.EVENTID = mp.EVENTID
+            WHERE e.STARTEVENTDATE >= CURRENT_TIMESTAMP - INTERVAL '60 days'
+              AND e.STARTEVENTDATE < CURRENT_TIMESTAMP
+              AND mp.EVENTID NOT IN ({ids_sql})
+            QUALIFY DENSE_RANK() OVER (
+                PARTITION BY ep.PLAYERNAME, ep.TARGET_EVENT
+                ORDER BY e.STARTEVENTDATE DESC
+            ) = 1
+        )
+        SELECT DISTINCT rpe.TARGET_EVENT AS EVENTID, rpe.PLAYERNAME,
+                        m.MARKETTYPENAME, rpe.STARTEVENTDATE AS LAST_GAME_DATE
+        FROM recent_player_events rpe
+        JOIN SPORTSCONTENT.DBO.MARKETSPLAYERS_GLOBAL mp2
+            ON mp2.PLAYERNAME = rpe.PLAYERNAME AND mp2.EVENTID = rpe.EVENTID
+        JOIN SPORTSCONTENT.DBO.MARKETS m
+            ON m.MARKETID = mp2.MARKETID AND m.EVENTID = rpe.EVENTID
+    """)
+
+@st.cache_data(ttl=30, show_spinner=False)
+def get_bulk_current_markets(event_ids: tuple) -> pd.DataFrame:
+    ids_sql = ",".join(f"'{e}'" for e in event_ids)
+    return run_query(f"""
+        SELECT mp.EVENTID, mp.PLAYERNAME, m.MARKETTYPENAME,
+               MAX(CASE WHEN m.ISREMOVED = FALSE THEN 1 ELSE 0 END) AS IS_LIVE
         FROM SPORTSCONTENT.DBO.MARKETSPLAYERS_GLOBAL mp
         JOIN SPORTSCONTENT.DBO.MARKETS m ON m.MARKETID = mp.MARKETID AND m.EVENTID = mp.EVENTID
         WHERE mp.EVENTID IN ({ids_sql})
-          AND m.ISREMOVED = FALSE
-        GROUP BY mp.EVENTID, m.MARKETTYPENAME
-    """)
-
-@st.cache_data(ttl=300, show_spinner=False)
-def get_overview_baselines(event_ids: tuple, league_id: str) -> pd.DataFrame:
-    return run_query(f"""
-        WITH recent_events AS (
-            SELECT DISTINCT e.EVENTID
-            FROM SPORTSCONTENT.DBO.EVENTS e
-            WHERE e.LEAGUEID = '{league_id}'
-              AND e.STARTEVENTDATE < CURRENT_TIMESTAMP
-              AND e.STARTEVENTDATE >= CURRENT_TIMESTAMP - INTERVAL '30 days'
-              AND EXISTS (SELECT 1 FROM SPORTSCONTENT.DBO.MARKETSPLAYERS_GLOBAL mp WHERE mp.EVENTID = e.EVENTID)
-            LIMIT 5
-        ),
-        prop_data AS (
-            SELECT DISTINCT mp.PLAYERNAME, m.MARKETTYPENAME, m.EVENTID
-            FROM recent_events re
-            JOIN SPORTSCONTENT.DBO.MARKETSPLAYERS_GLOBAL mp ON mp.EVENTID = re.EVENTID
-            JOIN SPORTSCONTENT.DBO.MARKETS m ON m.MARKETID = mp.MARKETID AND m.EVENTID = re.EVENTID
-        )
-        SELECT MARKETTYPENAME, COUNT(DISTINCT EVENTID) AS EVENTS_PRESENT
-        FROM prop_data
-        GROUP BY MARKETTYPENAME
-        HAVING COUNT(DISTINCT EVENTID) >= 4
+        GROUP BY mp.EVENTID, mp.PLAYERNAME, m.MARKETTYPENAME
     """)
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def get_player_baselines(event_id: str) -> pd.DataFrame:
-    # Use 60-day window to catch pitchers who start every 5 days
     return run_query(f"""
         WITH event_players AS (
             SELECT DISTINCT PLAYERNAME
@@ -254,51 +244,6 @@ def get_current_markets(event_id: str) -> pd.DataFrame:
         GROUP BY mp.PLAYERNAME, m.MARKETTYPENAME
     """)
 
-@st.cache_data(ttl=1800, show_spinner=False)
-def get_bulk_baselines(event_ids: tuple) -> pd.DataFrame:
-    """Single query fetching last-game baselines for all events at once."""
-    ids_sql = ",".join(f"'{e}'" for e in event_ids)
-    return run_query(f"""
-        WITH event_players AS (
-            SELECT DISTINCT PLAYERNAME, EVENTID AS TARGET_EVENT
-            FROM SPORTSCONTENT.DBO.MARKETSPLAYERS_GLOBAL
-            WHERE EVENTID IN ({ids_sql})
-        ),
-        recent_player_events AS (
-            SELECT ep.PLAYERNAME, ep.TARGET_EVENT, mp.EVENTID, e.STARTEVENTDATE
-            FROM event_players ep
-            JOIN SPORTSCONTENT.DBO.MARKETSPLAYERS_GLOBAL mp ON mp.PLAYERNAME = ep.PLAYERNAME
-            JOIN SPORTSCONTENT.DBO.EVENTS e ON e.EVENTID = mp.EVENTID
-            WHERE e.STARTEVENTDATE >= CURRENT_TIMESTAMP - INTERVAL '60 days'
-              AND e.STARTEVENTDATE < CURRENT_TIMESTAMP
-              AND mp.EVENTID NOT IN ({ids_sql})
-            QUALIFY DENSE_RANK() OVER (
-                PARTITION BY ep.PLAYERNAME, ep.TARGET_EVENT
-                ORDER BY e.STARTEVENTDATE DESC
-            ) = 1
-        )
-        SELECT DISTINCT rpe.TARGET_EVENT AS EVENTID, rpe.PLAYERNAME,
-                        m.MARKETTYPENAME, rpe.STARTEVENTDATE AS LAST_GAME_DATE
-        FROM recent_player_events rpe
-        JOIN SPORTSCONTENT.DBO.MARKETSPLAYERS_GLOBAL mp2
-            ON mp2.PLAYERNAME = rpe.PLAYERNAME AND mp2.EVENTID = rpe.EVENTID
-        JOIN SPORTSCONTENT.DBO.MARKETS m
-            ON m.MARKETID = mp2.MARKETID AND m.EVENTID = rpe.EVENTID
-    """)
-
-@st.cache_data(ttl=30, show_spinner=False)
-def get_bulk_current_markets(event_ids: tuple) -> pd.DataFrame:
-    """Single query fetching current market state for all events at once."""
-    ids_sql = ",".join(f"'{e}'" for e in event_ids)
-    return run_query(f"""
-        SELECT mp.EVENTID, mp.PLAYERNAME, m.MARKETTYPENAME,
-               MAX(CASE WHEN m.ISREMOVED = FALSE THEN 1 ELSE 0 END) AS IS_LIVE
-        FROM SPORTSCONTENT.DBO.MARKETSPLAYERS_GLOBAL mp
-        JOIN SPORTSCONTENT.DBO.MARKETS m ON m.MARKETID = mp.MARKETID AND m.EVENTID = mp.EVENTID
-        WHERE mp.EVENTID IN ({ids_sql})
-        GROUP BY mp.EVENTID, mp.PLAYERNAME, m.MARKETTYPENAME
-    """)
-
 @st.cache_data(ttl=300, show_spinner=False)
 def get_player_info(event_id: str) -> pd.DataFrame:
     participants = run_query(f"""
@@ -323,22 +268,14 @@ def get_player_info(event_id: str) -> pd.DataFrame:
 
 @st.cache_data(ttl=30, show_spinner=False)
 def get_activity_feed(event_id: str, minutes: int = 30) -> pd.DataFrame:
-    """
-    One row per (market type, action) change in the last N minutes.
-    Shows how many players are affected rather than repeating per player.
-    """
     return run_query(f"""
         WITH latest_per_market AS (
-            SELECT
-                m.MARKETID,
-                m.MARKETTYPENAME,
-                m.ISREMOVED,
-                m.FIRSTMESSAGETIMESTAMP,
-                m.LASTMESSAGETIMESTAMP,
-                ROW_NUMBER() OVER (
-                    PARTITION BY m.MARKETTYPENAME, m.ISREMOVED
-                    ORDER BY GREATEST(m.FIRSTMESSAGETIMESTAMP, m.LASTMESSAGETIMESTAMP) DESC
-                ) AS rn
+            SELECT m.MARKETID, m.MARKETTYPENAME, m.ISREMOVED,
+                   m.FIRSTMESSAGETIMESTAMP, m.LASTMESSAGETIMESTAMP,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY m.MARKETTYPENAME, m.ISREMOVED
+                       ORDER BY GREATEST(m.FIRSTMESSAGETIMESTAMP, m.LASTMESSAGETIMESTAMP) DESC
+                   ) AS rn
             FROM SPORTSCONTENT.DBO.MARKETS m
             WHERE m.EVENTID = '{event_id}'
               AND GREATEST(m.FIRSTMESSAGETIMESTAMP, m.LASTMESSAGETIMESTAMP)
@@ -347,15 +284,13 @@ def get_activity_feed(event_id: str, minutes: int = 30) -> pd.DataFrame:
         deduped AS (
             SELECT MARKETID, MARKETTYPENAME, ISREMOVED,
                    GREATEST(FIRSTMESSAGETIMESTAMP, LASTMESSAGETIMESTAMP) AS CHANGED_AT
-            FROM latest_per_market
-            WHERE rn = 1
+            FROM latest_per_market WHERE rn = 1
         )
-        SELECT
-            d.MARKETTYPENAME,
-            CASE WHEN d.ISREMOVED = TRUE THEN 'REMOVED' ELSE 'PUBLISHED' END AS ACTION,
-            d.CHANGED_AT,
-            COUNT(DISTINCT mp.PLAYERNAME) AS PLAYER_COUNT,
-            LISTAGG(DISTINCT mp.PLAYERNAME, ', ') WITHIN GROUP (ORDER BY mp.PLAYERNAME) AS PLAYERS
+        SELECT d.MARKETTYPENAME,
+               CASE WHEN d.ISREMOVED = TRUE THEN 'REMOVED' ELSE 'PUBLISHED' END AS ACTION,
+               d.CHANGED_AT,
+               COUNT(DISTINCT mp.PLAYERNAME) AS PLAYER_COUNT,
+               LISTAGG(DISTINCT mp.PLAYERNAME, ', ') WITHIN GROUP (ORDER BY mp.PLAYERNAME) AS PLAYERS
         FROM deduped d
         JOIN SPORTSCONTENT.DBO.MARKETSPLAYERS_GLOBAL mp
             ON mp.MARKETID = d.MARKETID AND mp.EVENTID = '{event_id}'
@@ -365,84 +300,11 @@ def get_activity_feed(event_id: str, minutes: int = 30) -> pd.DataFrame:
 
 # ── Build helpers ─────────────────────────────────────────────────────────────
 
-def compute_group_pcts(baselines: pd.DataFrame, current: pd.DataFrame, league_name: str) -> dict:
-    """Returns {group: (live, total)}. REMOVED counts against live."""
-    df = build_status_df(baselines, current, league_name)
-    if df.empty:
-        return {}
-    result = {}
-    for grp in GROUP_ORDER:
-        grp_df = df[df["GROUP"] == grp]
-        if grp_df.empty:
-            continue
-        live  = int((grp_df["STATUS"] == "LIVE").sum())
-        total = int(len(grp_df))
-        result[grp] = (live, total)
-    return result
-
-# O/U ↔ Milestone pairing: maps each O/U market to its expected Milestone partner
-OU_MILESTONE_PAIRS = {
-    "Points O/U":                       "Points Milestones",
-    "Rebounds O/U":                     "Rebounds Milestones",
-    "Assists O/U":                      "Assists Milestones",
-    "Three Pointers Made O/U":          "Three Pointers Made Milestones",
-    "Points + Rebounds O/U":            "Points + Rebounds Milestones",
-    "Points + Assists O/U":             "Points + Assists Milestones",
-    "Rebounds + Assists O/U":           "Rebounds + Assists Milestones",
-    "Points + Rebounds + Assists O/U":  "Points + Rebounds + Assists Milestones",
-    # MLB
-    "Hits O/U":                         "Hits Milestones",
-    "Strikeouts Thrown O/U":            "Strikeouts Thrown Milestones",
-    "Earned Runs Allowed O/U":          "Earned Runs Allowed Milestones",
-    "Hits Allowed O/U":                 "Hits Allowed Milestones",
-    "Total Bases O/U":                  "Total Bases Milestones",
-    "Hits + Runs + RBIs O/U":          "Hits + Runs + RBIs Milestones",
-    "Runs + RBIs O/U":                  "Runs + RBIs Milestones",
-    "Stolen Bases O/U":                 "Stolen Bases Milestones",
-    "Singles O/U":                      "Singles Milestones",
-    "Triples O/U":                      "Triples Milestones",
-    "Walks Allowed O/U":                "Walks Allowed Milestones",
-    "Strikeouts O/U":                   "Strikeouts Milestones",
-}
-
-def get_pairing_flags(df: pd.DataFrame) -> tuple:
-    """
-    Returns (urgent_flags, fyi_flags) DataFrames.
-    urgent = O/U live but Milestone not live (bettor can bet the line but not milestones)
-    fyi    = Milestone live but O/U not live (less critical)
-    """
-    if df.empty:
-        return pd.DataFrame(), pd.DataFrame()
-    status_map = df.groupby(["PLAYERNAME", "MARKET"])["STATUS"].first().to_dict()
-    urgent, fyi = [], []
-    for player in df["PLAYERNAME"].unique():
-        for ou, mile in OU_MILESTONE_PAIRS.items():
-            ou_status   = status_map.get((player, ou))
-            mile_status = status_map.get((player, mile))
-            if ou_status is None and mile_status is None:
-                continue
-            if ou_status == "LIVE" and mile_status != "LIVE":
-                urgent.append({
-                    "PLAYERNAME": player,
-                    "ISSUE": f"{ou} ✓  →  {mile} {mile_status or 'not posted'}",
-                })
-            elif mile_status == "LIVE" and ou_status != "LIVE":
-                fyi.append({
-                    "PLAYERNAME": player,
-                    "ISSUE": f"{mile} ✓  →  {ou} {ou_status or 'not posted'}",
-                })
-    return (
-        pd.DataFrame(urgent) if urgent else pd.DataFrame(),
-        pd.DataFrame(fyi)    if fyi    else pd.DataFrame(),
-    )
-
 def build_status_df(baselines: pd.DataFrame, current: pd.DataFrame, league_name: str,
                     player_info: pd.DataFrame = None) -> pd.DataFrame:
     is_mlb  = "mlb" in league_name.lower()
     is_wnba = "wnba" in league_name.lower()
-
     current_map = current.set_index(["PLAYERNAME", "MARKETTYPENAME"])["IS_LIVE"].to_dict() if not current.empty else {}
-
     rows = []
 
     if not baselines.empty:
@@ -454,9 +316,6 @@ def build_status_df(baselines: pd.DataFrame, current: pd.DataFrame, league_name:
         if is_wnba:
             bl = bl[~bl["MARKETTYPENAME"].isin(WNBA_EXCLUDED_MARKETS)]
         prop_players = bl[bl["GROUP"].isin(["Balanced", "Milestones"])]["PLAYERNAME"].unique()
-        # Gate on players who have at least one individual Balanced/Milestones market
-        # in the event (live OR removed) — excludes players who only appear via team
-        # scorer markets (1st Points Scorer etc) and were never actually offered as props
         if not current.empty:
             individual = current[
                 current["MARKETTYPENAME"].apply(classify_market).isin(["Balanced", "Milestones"])
@@ -466,7 +325,6 @@ def build_status_df(baselines: pd.DataFrame, current: pd.DataFrame, league_name:
             players_in_event = set()
         prop_players = [p for p in prop_players if p in players_in_event]
         bl = bl[bl["PLAYERNAME"].isin(prop_players)]
-
         for _, row in bl.iterrows():
             key = (row["PLAYERNAME"], row["MARKETTYPENAME"])
             if key in current_map:
@@ -481,8 +339,6 @@ def build_status_df(baselines: pd.DataFrame, current: pd.DataFrame, league_name:
                 "STATUS":     status,
             })
 
-    # For MLB: any roster player not covered by their own baseline should still
-    # appear using whatever markets are currently live/missing for them
     if is_mlb and player_info is not None and not current.empty:
         covered = {r["PLAYERNAME"] for r in rows}
         roster_players = set(player_info["PLAYERNAME"].tolist())
@@ -490,66 +346,98 @@ def build_status_df(baselines: pd.DataFrame, current: pd.DataFrame, league_name:
             player_current = current[current["PLAYERNAME"] == player]
             for _, crow in player_current.iterrows():
                 grp = classify_market(crow["MARKETTYPENAME"])
-                if grp in ("Exclude",) or crow["MARKETTYPENAME"] in MLB_EXCLUDED_MARKETS:
+                if grp == "Exclude" or crow["MARKETTYPENAME"] in MLB_EXCLUDED_MARKETS:
                     continue
                 status = "LIVE" if crow["IS_LIVE"] == 1 else "REMOVED"
-                rows.append({
-                    "PLAYERNAME": player,
-                    "MARKET":     crow["MARKETTYPENAME"],
-                    "GROUP":      grp,
-                    "LAST_GAME":  "roster",
-                    "STATUS":     status,
-                })
+                rows.append({"PLAYERNAME": player, "MARKET": crow["MARKETTYPENAME"],
+                              "GROUP": grp, "LAST_GAME": "roster", "STATUS": status})
 
     if not rows:
         return pd.DataFrame()
     df = pd.DataFrame(rows)
-    # Drop players where every individual stat market (O/U + Milestones, excluding
-    # scorer/team markets like 1st Points Scorer) is REMOVED — signals player ruled out
     SCORER_MARKETS = {"1st Points Scorer", "Player First Field Goal Made Type"}
     individual = df[~df["MARKET"].isin(SCORER_MARKETS) & df["GROUP"].isin(["Balanced", "Milestones"])]
     if not individual.empty:
         all_removed = individual.groupby("PLAYERNAME")["STATUS"].apply(lambda s: (s == "REMOVED").all())
         keep = set(all_removed[~all_removed].index)
-        # Also keep players who have no individual markets at all (e.g. only scorer markets)
-        players_with_individual = set(individual["PLAYERNAME"].unique())
-        players_without_individual = set(df["PLAYERNAME"].unique()) - players_with_individual
-        keep = keep | players_without_individual
-        df = df[df["PLAYERNAME"].isin(keep)]
+        players_without_individual = set(df["PLAYERNAME"].unique()) - set(individual["PLAYERNAME"].unique())
+        df = df[df["PLAYERNAME"].isin(keep | players_without_individual)]
     return df
+
+def compute_group_pcts(baselines: pd.DataFrame, current: pd.DataFrame, league_name: str) -> dict:
+    df = build_status_df(baselines, current, league_name)
+    if df.empty:
+        return {}
+    result = {}
+    for grp in DEFAULT_GROUPS:  # Only Balanced + Milestones for overview
+        grp_df = df[df["GROUP"] == grp]
+        if grp_df.empty:
+            continue
+        result[grp] = (int((grp_df["STATUS"] == "LIVE").sum()), int(len(grp_df)))
+    return result
+
+# O/U ↔ Milestone pairing
+OU_MILESTONE_PAIRS = {
+    "Points O/U": "Points Milestones",
+    "Rebounds O/U": "Rebounds Milestones",
+    "Assists O/U": "Assists Milestones",
+    "Three Pointers Made O/U": "Three Pointers Made Milestones",
+    "Points + Rebounds O/U": "Points + Rebounds Milestones",
+    "Points + Assists O/U": "Points + Assists Milestones",
+    "Rebounds + Assists O/U": "Rebounds + Assists Milestones",
+    "Points + Rebounds + Assists O/U": "Points + Rebounds + Assists Milestones",
+    "Hits O/U": "Hits Milestones",
+    "Strikeouts Thrown O/U": "Strikeouts Thrown Milestones",
+    "Earned Runs Allowed O/U": "Earned Runs Allowed Milestones",
+    "Hits Allowed O/U": "Hits Allowed Milestones",
+    "Total Bases O/U": "Total Bases Milestones",
+    "Hits + Runs + RBIs O/U": "Hits + Runs + RBIs Milestones",
+    "Runs + RBIs O/U": "Runs + RBIs Milestones",
+    "Stolen Bases O/U": "Stolen Bases Milestones",
+    "Singles O/U": "Singles Milestones",
+    "Triples O/U": "Triples Milestones",
+    "Walks Allowed O/U": "Walks Allowed Milestones",
+    "Strikeouts O/U": "Strikeouts Milestones",
+}
+
+def get_pairing_flags(df: pd.DataFrame) -> tuple:
+    if df.empty:
+        return pd.DataFrame(), pd.DataFrame()
+    status_map = df.groupby(["PLAYERNAME", "MARKET"])["STATUS"].first().to_dict()
+    urgent, fyi = [], []
+    for player in df["PLAYERNAME"].unique():
+        for ou, mile in OU_MILESTONE_PAIRS.items():
+            ou_s   = status_map.get((player, ou))
+            mile_s = status_map.get((player, mile))
+            if ou_s is None and mile_s is None:
+                continue
+            ou_short   = market_short(ou)
+            mile_short = market_short(mile)
+            if ou_s == "LIVE" and mile_s != "LIVE":
+                urgent.append({"PLAYERNAME": player,
+                                "ISSUE": f"{ou_short} ✓ → {mile_short} {mile_s or 'not posted'}"})
+            elif mile_s == "LIVE" and ou_s != "LIVE":
+                fyi.append({"PLAYERNAME": player,
+                             "ISSUE": f"{mile_short} ✓ → {ou_short} {ou_s or 'not posted'}"})
+    return (pd.DataFrame(urgent) if urgent else pd.DataFrame(),
+            pd.DataFrame(fyi)    if fyi    else pd.DataFrame())
 
 STATUS_COLOR = {"LIVE": "#16a34a", "MISSING": "#dc2626", "REMOVED": "#b45309"}
 
 def market_short(name: str) -> str:
     replacements = [
-        ("Points + Rebounds + Assists", "PRA"),
-        ("Points + Rebounds", "P+R"),
-        ("Points + Assists", "P+A"),
-        ("Rebounds + Assists", "R+A"),
-        ("Three Pointers Made", "3PM"),
-        ("Hits + Runs + RBIs", "H+R+RBI"),
+        ("Points + Rebounds + Assists", "PRA"), ("Points + Rebounds", "P+R"),
+        ("Points + Assists", "P+A"), ("Rebounds + Assists", "R+A"),
+        ("Three Pointers Made", "3PM"), ("Hits + Runs + RBIs", "H+R+RBI"),
         ("Hits Allowed + Walks Allowed + Earned Runs Allowed", "HA+BB+ER"),
-        ("Strikeouts Thrown", "K Thrown"),
-        ("Earned Runs Allowed", "ERA"),
-        ("Stolen Bases", "SB"),
-        ("Total Bases", "TB"),
-        ("Points", "Pts"),
-        ("Rebounds", "Reb"),
-        ("Assists", "Ast"),
-        ("Strikeouts", "K"),
-        ("Triples", "3B"),
-        ("Singles", "1B"),
-        (" O/U", ""),
-        (" Milestones", " Mile"),
-        ("Double-Double", "Dbl-Dbl"),
-        ("Triple-Double", "Tri-Dbl"),
-        ("1st Points Scorer", "1st Pts"),
-        ("Player First Field Goal Made Type", "1st FG Type"),
-        ("1st Batter to Strike Out", "1st K"),
-        ("1st Stolen Base", "1st SB"),
-        ("1st Hit", "1st Hit"),
-        ("Hits Allowed (X or Fewer)", "H Allow"),
-        ("Hits Allowed", "HA"),
+        ("Strikeouts Thrown", "K Thrown"), ("Earned Runs Allowed", "ERA"),
+        ("Stolen Bases", "SB"), ("Total Bases", "TB"), ("Points", "Pts"),
+        ("Rebounds", "Reb"), ("Assists", "Ast"), ("Strikeouts", "K"),
+        ("Triples", "3B"), ("Singles", "1B"), (" O/U", ""), (" Milestones", " Mile"),
+        ("Double-Double", "Dbl-Dbl"), ("Triple-Double", "Tri-Dbl"),
+        ("1st Points Scorer", "1st Pts"), ("Player First Field Goal Made Type", "1st FG Type"),
+        ("1st Batter to Strike Out", "1st K"), ("1st Stolen Base", "1st SB"),
+        ("1st Hit", "1st Hit"), ("Hits Allowed (X or Fewer)", "H Allow"), ("Hits Allowed", "HA"),
     ]
     out = name
     for old, new in replacements:
@@ -569,7 +457,6 @@ def render_market_completion(df: pd.DataFrame, league_name: str = ""):
     summary["TOTAL"] = summary["LIVE"] + summary["MISSING"] + summary["REMOVED"]
     summary["PCT"]   = summary["LIVE"] / summary["TOTAL"].replace(0, 1)
     summary["GORD"]  = summary["GROUP"].apply(lambda g: GROUP_ORDER.index(g) if g in GROUP_ORDER else 99)
-
     is_wnba = "wnba" in league_name.lower()
     if is_wnba:
         summary["MORD"] = summary["MARKET"].apply(_wnba_market_sort_key)
@@ -615,35 +502,24 @@ def render_market_completion(df: pd.DataFrame, league_name: str = ""):
         else:
             sub = ""
 
-        bar_track = "<div style='width:80px;background:#374151;border-radius:3px;height:7px'>"
-        bar_fill  = "<div style='width:" + str(bar_w) + "%;background:" + color + ";height:7px;border-radius:3px'></div>"
-        count_span = (
-            "<span style='font-size:0.8em;font-weight:700;color:" + color + ";min-width:38px;"
-            "text-align:right'>" + str(live) + "/" + str(total) + "</span>"
-        )
-        right_div = (
-            "<div style='display:flex;align-items:center;gap:8px;justify-content:flex-end'>"
-            + bar_track + bar_fill + "</div>"
-            + count_span
-            + "</div>"
-        )
-        row_html = (
+        st.markdown(
             "<div style='display:grid;grid-template-columns:1fr auto;"
             "align-items:center;gap:12px;padding:6px 0;border-bottom:1px solid #1f2937'>"
-            "<div>"
-            "<div style='font-size:0.83em;font-weight:500'>" + market + "</div>"
-            + sub +
-            "</div>"
+            "<div><div style='font-size:0.83em;font-weight:500'>" + market + "</div>" + sub + "</div>"
             "<div style='text-align:right;min-width:140px'>"
-            + right_div +
+            "<div style='display:flex;align-items:center;gap:8px;justify-content:flex-end'>"
+            "<div style='width:80px;background:#374151;border-radius:3px;height:7px'>"
+            "<div style='width:" + str(bar_w) + "%;background:" + color + ";height:7px;border-radius:3px'></div>"
             "</div>"
-            "</div>"
+            "<span style='font-size:0.8em;font-weight:700;color:" + color + ";min-width:38px;text-align:right'>"
+            + str(live) + "/" + str(total) + "</span></div></div></div>",
+            unsafe_allow_html=True,
         )
-        st.markdown(row_html, unsafe_allow_html=True)
 
 # ── Render: player cards ──────────────────────────────────────────────────────
 
-def render_player_cards(df: pd.DataFrame, player_info: pd.DataFrame, sport_name: str):
+def render_player_cards(df: pd.DataFrame, player_info: pd.DataFrame, sport_name: str,
+                        issues_only: bool = False):
     info = player_info.set_index("PLAYERNAME")
     missing_count = df[df["STATUS"] == "MISSING"].groupby("PLAYERNAME").size().to_dict()
 
@@ -655,18 +531,16 @@ def render_player_cards(df: pd.DataFrame, player_info: pd.DataFrame, sport_name:
             return 2
         return 0
 
-    # Team first, then most missing within each team, then position (baseball), then name
-    players = sorted(df["PLAYERNAME"].unique(),
-        key=lambda p: (
-            int(info.loc[p, "TEAM_ORDER"]) if p in info.index else 99,
-            -missing_count.get(p, 0),
-            pos_order(p),
-            p,
-        ))
+    players = sorted(df["PLAYERNAME"].unique(), key=lambda p: (
+        int(info.loc[p, "TEAM_ORDER"]) if p in info.index else 99,
+        -missing_count.get(p, 0),
+        pos_order(p), p,
+    ))
 
     current_team = None
     cols_per_row = 4
     card_buffer  = []
+    is_baseball  = "baseball" in sport_name.lower() or "mlb" in sport_name.lower()
 
     def build_card_html(player, player_df):
         markets   = player_df.sort_values(["GROUP", "MARKET"])
@@ -677,8 +551,6 @@ def render_player_cards(df: pd.DataFrame, player_info: pd.DataFrame, sport_name:
         pct       = n_live / n_total if n_total else 0
         border    = "#dc2626" if n_missing > 0 else ("#b45309" if n_removed > 0 else "#16a34a")
         bar_fill  = str(int(pct * 56))
-
-        # Only show markets that are not live (missing or removed)
         not_live_markets = markets[markets["STATUS"] != "LIVE"]
 
         if n_missing == 0 and n_removed == 0:
@@ -703,29 +575,22 @@ def render_player_cards(df: pd.DataFrame, player_info: pd.DataFrame, sport_name:
                     "<div style='margin-top:7px'>"
                     "<span style='font-size:0.62em;text-transform:uppercase;letter-spacing:0.08em;"
                     "color:#4b5563;font-weight:700'>" + grp + "</span>"
-                    "<div style='margin-top:3px'>" + pills + "</div>"
-                    "</div>"
+                    "<div style='margin-top:3px'>" + pills + "</div></div>"
                 )
 
         bar_html = (
             "<div style='width:56px;height:3px;background:#374151;border-radius:2px;margin-top:3px'>"
-            "<div style='width:" + bar_fill + "px;height:3px;background:" + border + ";border-radius:2px'></div>"
-            "</div>"
+            "<div style='width:" + bar_fill + "px;height:3px;background:" + border + ";border-radius:2px'></div></div>"
         )
-        count_str = str(n_live) + "/" + str(n_total)
-
         return (
             "<div style='border:1px solid " + border + ";border-radius:8px;"
             "padding:11px 13px 9px;margin-bottom:8px;background:#0f172a'>"
             "<div style='display:flex;justify-content:space-between;align-items:flex-start'>"
             "<span style='font-weight:700;font-size:0.88em;line-height:1.3'>" + player + "</span>"
             "<div style='text-align:right;flex-shrink:0;margin-left:8px'>"
-            "<span style='font-size:0.75em;color:" + border + ";font-weight:700'>" + count_str + "</span>"
-            + bar_html +
-            "</div>"
-            "</div>"
-            + sections +
-            "</div>"
+            "<span style='font-size:0.75em;color:" + border + ";font-weight:700'>"
+            + str(n_live) + "/" + str(n_total) + "</span>" + bar_html + "</div></div>"
+            + sections + "</div>"
         )
 
     def flush(cards):
@@ -735,14 +600,15 @@ def render_player_cards(df: pd.DataFrame, player_info: pd.DataFrame, sport_name:
             for col, (player, player_df) in zip(cols, chunk):
                 col.markdown(build_card_html(player, player_df), unsafe_allow_html=True)
 
-    is_baseball = "baseball" in sport_name.lower() or "mlb" in sport_name.lower()
-
+    hidden_count = 0
     for player in players:
         player_df = df[df["PLAYERNAME"] == player]
-        # For MLB: skip players with no live or removed markets (lineup scratch, props not up yet)
         if is_baseball and (player_df["STATUS"] == "MISSING").all():
             continue
-
+        has_issue = not ((player_df["STATUS"] == "LIVE").all())
+        if issues_only and not has_issue:
+            hidden_count += 1
+            continue
         team = info.loc[player, "TEAM"] if player in info.index else ""
         if team != current_team:
             if card_buffer:
@@ -760,6 +626,8 @@ def render_player_cards(df: pd.DataFrame, player_info: pd.DataFrame, sport_name:
 
     if card_buffer:
         flush(card_buffer)
+    if hidden_count:
+        st.caption(f"{hidden_count} player{'s' if hidden_count > 1 else ''} with all markets live hidden.")
 
 # ── Page: Detail view ─────────────────────────────────────────────────────────
 
@@ -794,95 +662,116 @@ def show_detail(event_row, league_name):
 
     st.divider()
 
-    # ── Load activity feed + pairing flags ───────────────────────────────────
+    urgent_flags, fyi_flags = get_pairing_flags(df)
+
+    # ── Summary — Missing is the hero ────────────────────────────────────────
+    live    = int((df["STATUS"] == "LIVE").sum())
+    missing = int((df["STATUS"] == "MISSING").sum())
+    removed = int((df["STATUS"] == "REMOVED").sum())
+    total   = int(len(df))
+
+    m1, m2, m3, m4, m5 = st.columns([2, 1, 1, 1, 1])
+    # Missing as hero — large red number
+    miss_color = "#dc2626" if missing > 0 else "#16a34a"
+    m1.markdown(
+        "<div>"
+        "<div style='font-size:0.75em;color:#9ca3af;font-weight:600;text-transform:uppercase;"
+        "letter-spacing:0.05em'>Missing</div>"
+        "<div style='font-size:2.2em;font-weight:800;color:" + miss_color + ";line-height:1.1'>"
+        + str(missing) + "</div>"
+        "<div style='font-size:0.75em;color:#6b7280'>of " + str(total) + " expected</div>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+    m2.metric("Live",    live)
+    m3.metric("Removed", removed)
+    if len(urgent_flags) > 0:
+        m4.metric("Line/Mile gaps", len(urgent_flags))
+    m5.metric("Total", total)
+
+    # ── Activity feed (most urgent — what just changed) ───────────────────────
     try:
         activity = get_activity_feed(event_row["EVENTID"])
     except Exception:
         activity = pd.DataFrame()
 
-    urgent_flags, fyi_flags = get_pairing_flags(df)
-
-    # ── Summary counts (REMOVED counts as not-live) ───────────────────────────
-    filtered = df.copy()
-    live    = int((filtered["STATUS"] == "LIVE").sum())
-    missing = int((filtered["STATUS"] == "MISSING").sum())
-    removed = int((filtered["STATUS"] == "REMOVED").sum())
-    total   = int(len(filtered))
-
-    cols_sum = st.columns([1, 1, 1, 1, 1])
-    cols_sum[0].metric("Live",       live)
-    cols_sum[1].metric("Missing",    missing)
-    cols_sum[2].metric("Removed",    removed)
-    cols_sum[3].metric("Line/Mile gaps", len(urgent_flags))
-    cols_sum[4].metric("Total",      total)
-
-    # ── Urgent pairing flags: O/U live, Milestone not ────────────────────────
-    if not urgent_flags.empty:
-        with st.expander(f"⚠️ Line posted, Milestone missing ({len(urgent_flags)})", expanded=True):
-            for _, row in urgent_flags.iterrows():
-                st.markdown(
-                    "<div style='padding:4px 0;font-size:0.85em'>"
-                    "<span style='color:#f87171;font-weight:700'>" + row["PLAYERNAME"] + "</span>"
-                    "  —  <span style='color:#e5e7eb'>" + row["ISSUE"] + "</span>"
-                    "</div>",
-                    unsafe_allow_html=True,
-                )
-
-    # ── FYI pairing flags: Milestone live, O/U not ───────────────────────────
-    if not fyi_flags.empty:
-        with st.expander(f"ℹ️ Milestone posted, Line missing ({len(fyi_flags)})", expanded=False):
-            for _, row in fyi_flags.iterrows():
-                st.markdown(
-                    "<div style='padding:4px 0;font-size:0.85em'>"
-                    "<span style='color:#fbbf24;font-weight:700'>" + row["PLAYERNAME"] + "</span>"
-                    "  —  <span style='color:#9ca3af'>" + row["ISSUE"] + "</span>"
-                    "</div>",
-                    unsafe_allow_html=True,
-                )
-
-    # ── Activity feed ─────────────────────────────────────────────────────────
     if not activity.empty:
         PT = pytz.timezone("America/Los_Angeles")
         activity["CHANGED_AT_PT"] = pd.to_datetime(activity["CHANGED_AT"]).dt.tz_localize("UTC").dt.tz_convert(PT)
-        with st.expander(f"📋 Recent activity — last 30 min ({len(activity)} changes)", expanded=False):
+        with st.expander(f"📋 Recent activity — last 30 min ({len(activity)} changes)", expanded=True):
             for _, row in activity.iterrows():
-                color    = "#16a34a" if row["ACTION"] == "PUBLISHED" else "#dc2626"
-                ts       = row["CHANGED_AT_PT"].strftime("%I:%M %p")
-                players  = str(row["PLAYERS"]) if row["PLAYERS"] else ""
+                action      = str(row["ACTION"])
+                action_color = "#16a34a" if action == "PUBLISHED" else "#dc2626"
+                ts          = row["CHANGED_AT_PT"].strftime("%I:%M %p")
+                players     = str(row["PLAYERS"]) if row["PLAYERS"] else ""
+                # Color market name by group importance
+                mkt_grp     = classify_market(str(row["MARKETTYPENAME"]))
+                mkt_color   = "#e5e7eb" if mkt_grp in ("Balanced", "Milestones") else "#6b7280"
                 st.markdown(
                     "<div style='padding:5px 0;border-bottom:1px solid #1e293b;font-size:0.82em'>"
                     "<div style='display:flex;gap:12px;align-items:center'>"
                     "<span style='color:#6b7280;min-width:60px'>" + ts + "</span>"
-                    "<span style='color:" + color + ";font-weight:700;min-width:80px'>" + row["ACTION"] + "</span>"
-                    "<span style='color:#e5e7eb;font-weight:500'>" + row["MARKETTYPENAME"] + "</span>"
+                    "<span style='color:" + action_color + ";font-weight:700;min-width:80px'>" + action + "</span>"
+                    "<span style='color:" + mkt_color + ";font-weight:500'>" + str(row["MARKETTYPENAME"]) + "</span>"
                     "</div>"
                     "<div style='color:#9ca3af;font-size:0.9em;margin-top:2px;padding-left:152px'>" + players + "</div>"
                     "</div>",
                     unsafe_allow_html=True,
                 )
 
+    # ── Pairing flags ─────────────────────────────────────────────────────────
+    if not urgent_flags.empty:
+        with st.expander(f"⚠️ Line posted, Milestone missing ({len(urgent_flags)})", expanded=True):
+            for _, row in urgent_flags.iterrows():
+                st.markdown(
+                    "<div style='padding:4px 0;font-size:0.85em'>"
+                    "<span style='color:#f87171;font-weight:700'>" + row["PLAYERNAME"] + "</span>"
+                    "  —  <span style='color:#e5e7eb'>" + row["ISSUE"] + "</span></div>",
+                    unsafe_allow_html=True,
+                )
+
+    if not fyi_flags.empty:
+        with st.expander(f"ℹ️ Milestone posted, Line missing ({len(fyi_flags)})", expanded=False):
+            for _, row in fyi_flags.iterrows():
+                st.markdown(
+                    "<div style='padding:4px 0;font-size:0.85em'>"
+                    "<span style='color:#fbbf24;font-weight:700'>" + row["PLAYERNAME"] + "</span>"
+                    "  —  <span style='color:#9ca3af'>" + row["ISSUE"] + "</span></div>",
+                    unsafe_allow_html=True,
+                )
+
     st.divider()
 
-    # ── Group tabs (REMOVED counts against live in label) ────────────────────
+    # ── Group tabs — Balanced + Milestones by default, Team/H2H hidden ────────
     all_groups = [g for g in GROUP_ORDER if g in df["GROUP"].unique()]
+
+    # Tab labels: show live/total, flag if not complete
     tab_labels = []
     for g in all_groups:
-        grp_df  = filtered[filtered["GROUP"] == g]
-        n_miss  = int((grp_df["STATUS"] == "MISSING").sum())
-        n_rem   = int((grp_df["STATUS"] == "REMOVED").sum())
+        grp_df  = df[df["GROUP"] == g]
         n_live  = int((grp_df["STATUS"] == "LIVE").sum())
         n_total = int(len(grp_df))
-        n_bad   = n_miss + n_rem
-        if n_bad:
-            label = g + f"  ❌ {n_bad}/{n_total}"
+        n_bad   = n_total - n_live
+        if g not in DETAIL_DEFAULT_GROUPS:
+            label = g  # no badge for secondary groups
+        elif n_bad:
+            label = g + f"  ❌ {n_live}/{n_total}"
         else:
             label = g + f"  ✅ {n_live}"
         tab_labels.append(label)
 
-    tabs = st.tabs(tab_labels)
-    for tab, grp in zip(tabs, all_groups):
+    # Reorder so default groups come first
+    ordered_groups = [g for g in DETAIL_DEFAULT_GROUPS if g in all_groups] + \
+                     [g for g in all_groups if g not in DETAIL_DEFAULT_GROUPS]
+    ordered_labels = []
+    for g in ordered_groups:
+        idx = all_groups.index(g)
+        ordered_labels.append(tab_labels[idx])
+
+    tabs = st.tabs(ordered_labels)
+    for tab, grp in zip(tabs, ordered_groups):
         with tab:
-            grp_df = filtered[filtered["GROUP"] == grp]
+            grp_df = df[df["GROUP"] == grp]
             if grp_df.empty:
                 st.caption("No markets in this group.")
                 continue
@@ -892,8 +781,12 @@ def show_detail(event_row, league_name):
 
             st.markdown("<div style='height:20px'></div>", unsafe_allow_html=True)
 
+            # Issues-only toggle
+            issues_col, _ = st.columns([2, 4])
+            issues_only = issues_col.toggle("Show issues only", value=False, key=f"issues_{grp}")
+
             st.markdown("##### Players")
-            render_player_cards(grp_df, player_info, league_name)
+            render_player_cards(grp_df, player_info, league_name, issues_only)
 
 # ── Page: Overview ────────────────────────────────────────────────────────────
 
@@ -908,7 +801,6 @@ def show_overview(events_df, league_name):
     PT        = pytz.timezone("America/Los_Angeles")
     now_pt    = pd.Timestamp.utcnow().tz_convert(PT)
 
-    # ── Two bulk queries, then all computation in Python ─────────────────────
     try:
         bulk_baselines = get_bulk_baselines(event_ids)
         bulk_current   = get_bulk_current_markets(event_ids)
@@ -916,7 +808,6 @@ def show_overview(events_df, league_name):
         st.error(f"Failed to load market stats: {e}")
         return
 
-    # Pre-compute pcts for every event
     all_pcts = {}
     for eid in event_ids:
         bl  = bulk_baselines[bulk_baselines["EVENTID"] == eid].drop(columns="EVENTID")
@@ -926,76 +817,107 @@ def show_overview(events_df, league_name):
         except Exception:
             all_pcts[eid] = {}
 
-    # ── Render all cards ──────────────────────────────────────────────────────
     for _, ev in events_df.iterrows():
-        eid       = ev["EVENTID"]
-        countdown = ev["countdown"]
-        start_str = ev["STARTEVENTDATE"].strftime("%b %d, %I:%M %p PT")
-        pcts_raw  = all_pcts.get(eid, {})
+        eid          = ev["EVENTID"]
+        countdown    = ev["countdown"]
+        start_str    = ev["STARTEVENTDATE"].strftime("%b %d, %I:%M %p PT")
+        pcts_raw     = all_pcts.get(eid, {})
         group_pcts   = {g: v[0] / v[1] if v[1] else 0.0 for g, v in pcts_raw.items()}
         group_counts = pcts_raw
+
+        # Overall % = Balanced + Milestones combined
+        total_live  = sum(v[0] for v in pcts_raw.values())
+        total_exp   = sum(v[1] for v in pcts_raw.values())
+        overall_pct = total_live / total_exp if total_exp else 0.0
+        overall_color = pct_color(overall_pct)
 
         secs_left = int((ev["STARTEVENTDATE"] - now_pt).total_seconds())
         if secs_left <= 0:
             cd_color, cd_bg = "#4ade80", "#052e16"
+            card_border = "#052e16"
         elif secs_left < 3600:
             cd_color, cd_bg = "#f87171", "#2d0a0a"
+            card_border = "#7f1d1d" if overall_pct < 0.9 else "#1e293b"
         elif secs_left < 10800:
             cd_color, cd_bg = "#fbbf24", "#2d1b00"
+            card_border = "#1e293b"
         else:
             cd_color, cd_bg = "#93c5fd", "#0f172a"
+            card_border = "#1e293b"
 
-        with st.container(border=True):
-            col_cd, col_info, col_stats, col_btn = st.columns([1, 3, 4, 1])
+        # Colored left border by overall health
+        if overall_pct < 0.8:
+            card_border = "#7f1d1d"
+        elif overall_pct < 0.95:
+            card_border = "#78350f"
+
+        # Whole card is clickable via a button overlay
+        with st.container(border=False):
+            st.markdown(
+                "<div style='border:1px solid #374151;border-left:4px solid " + card_border + ";"
+                "border-radius:8px;padding:0;margin-bottom:8px;overflow:hidden'>",
+                unsafe_allow_html=True,
+            )
+            col_cd, col_info, col_stats, col_btn = st.columns([1, 3, 3, 1])
 
             with col_cd:
                 st.markdown(
-                    "<div style='background:" + cd_bg + ";border-radius:8px;padding:10px 6px;"
-                    "text-align:center;height:100%;display:flex;flex-direction:column;"
-                    "justify-content:center;align-items:center'>"
+                    "<div style='background:" + cd_bg + ";padding:14px 8px;text-align:center;"
+                    "height:100%;display:flex;flex-direction:column;justify-content:center;align-items:center'>"
                     "<span style='font-size:1.5em;font-weight:800;color:" + cd_color + ";line-height:1.1'>"
                     + countdown + "</span>"
-                    "<span style='font-size:0.65em;color:#6b7280;margin-top:4px'>" + start_str + "</span>"
+                    "<span style='font-size:0.62em;color:#6b7280;margin-top:4px'>" + start_str + "</span>"
                     "</div>",
                     unsafe_allow_html=True,
                 )
 
             with col_info:
                 st.markdown(
-                    "<div style='padding:8px 0'>"
+                    "<div style='padding:14px 0 14px 8px'>"
                     "<div style='font-size:1.05em;font-weight:700'>" + ev["EVENTNAME"] + "</div>"
                     "<div style='font-size:0.78em;color:#6b7280;margin-top:3px'>" + ev["LEAGUENAME"] + "</div>"
+                    # Overall % as a single hero number
+                    "<div style='margin-top:8px'>"
+                    "<span style='font-size:1.8em;font-weight:800;color:" + overall_color + "'>"
+                    + str(int(overall_pct * 100)) + "%</span>"
+                    "<span style='font-size:0.75em;color:#6b7280;margin-left:6px'>"
+                    + str(total_live) + "/" + str(total_exp) + " props live</span>"
+                    "</div>"
                     "</div>",
                     unsafe_allow_html=True,
                 )
 
             with col_stats:
+                # Only Balanced + Milestones pills — no Team/H2H
                 if group_pcts:
-                    pills_html = "<div style='display:flex;flex-wrap:wrap;gap:8px;padding:4px 0'>"
-                    for grp, pct in group_pcts.items():
-                        color         = pct_color(pct)
+                    pills_html = "<div style='display:flex;flex-wrap:wrap;gap:8px;padding:14px 0'>"
+                    for grp in DEFAULT_GROUPS:
+                        if grp not in group_pcts:
+                            continue
+                        pct   = group_pcts[grp]
+                        color = pct_color(pct)
                         live_n, total_n = group_counts.get(grp, (0, 0))
                         pills_html += (
                             "<div style='display:flex;flex-direction:column;align-items:center;"
-                            "min-width:72px;padding:4px 8px;border-radius:6px;background:#1e293b'>"
-                            "<span style='font-size:1.25em;font-weight:800;color:" + color + ";line-height:1.1'>"
+                            "min-width:80px;padding:6px 10px;border-radius:6px;background:#1e293b'>"
+                            "<span style='font-size:1.3em;font-weight:800;color:" + color + ";line-height:1.1'>"
                             + str(int(pct * 100)) + "%</span>"
-                            "<span style='font-size:0.7em;color:" + color + ";font-weight:600'>"
+                            "<span style='font-size:0.72em;color:" + color + ";font-weight:600'>"
                             + str(live_n) + "/" + str(total_n) + "</span>"
                             "<span style='font-size:0.62em;color:#6b7280;margin-top:1px'>" + grp + "</span>"
                             "</div>"
                         )
                     pills_html += "</div>"
                     st.markdown(pills_html, unsafe_allow_html=True)
-                else:
-                    st.caption("No baseline data for this league.")
 
             with col_btn:
-                st.markdown("<div style='padding-top:14px'>", unsafe_allow_html=True)
-                if st.button("View →", key="btn_" + eid):
+                st.markdown("<div style='padding-top:20px;padding-right:8px'>", unsafe_allow_html=True)
+                if st.button("View →", key="btn_" + eid, use_container_width=True):
                     st.session_state.selected_event_id = eid
                     st.rerun()
                 st.markdown("</div>", unsafe_allow_html=True)
+
+            st.markdown("</div>", unsafe_allow_html=True)
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
@@ -1004,17 +926,16 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# League selector — two buttons, no dropdown
 if "selected_league" not in st.session_state:
     st.session_state.selected_league = "WNBA"
 
 btn_col = st.columns([3, 1, 1, 3])
 for i, league_name in enumerate(LEAGUES):
     active = st.session_state.selected_league == league_name
-    style  = "primary" if active else "secondary"
-    if btn_col[i + 1].button(league_name, type=style, use_container_width=True):
-        st.session_state.selected_league     = league_name
-        st.session_state.selected_event_id   = None
+    if btn_col[i + 1].button(league_name, type="primary" if active else "secondary",
+                              use_container_width=True):
+        st.session_state.selected_league   = league_name
+        st.session_state.selected_event_id = None
 
 selected_league = st.session_state.selected_league
 sport_id        = LEAGUES[selected_league]["sport_id"]
