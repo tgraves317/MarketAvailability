@@ -722,9 +722,11 @@ def build_status_df(baselines: pd.DataFrame, current: pd.DataFrame, league_name:
     SCORER_MARKETS = {"1st Points Scorer", "Player First Field Goal Made Type"}
     individual = df[~df["MARKET"].isin(SCORER_MARKETS) & df["GROUP"].isin(["Balanced", "Milestones"])]
     if not individual.empty:
-        # Drop players where all individual markets are REMOVED (ruled out / pulled entirely)
+        # Drop players where all individual markets are REMOVED — they're ruled out/scratched
+        # BUT keep roster players (LAST_GAME == "roster") — confirmed in today's lineup
+        roster_players = set(df[df["LAST_GAME"] == "roster"]["PLAYERNAME"].unique())
         all_removed = individual.groupby("PLAYERNAME")["STATUS"].apply(lambda s: (s == "REMOVED").all())
-        keep = set(all_removed[~all_removed].index)
+        keep = set(all_removed[~all_removed].index) | roster_players
         players_without_individual = set(df["PLAYERNAME"].unique()) - set(individual["PLAYERNAME"].unique())
         df = df[df["PLAYERNAME"].isin(keep | players_without_individual)]
 
@@ -1026,8 +1028,13 @@ def render_player_cards(df: pd.DataFrame, player_info: pd.DataFrame, sport_name:
     hidden_count = 0
     for player in players:
         player_df = df[df["PLAYERNAME"] == player]
+        # For MLB: skip only baseline players (prior game history) with nothing live —
+        # these are scratched from today's lineup. Roster players (confirmed in today's
+        # lineup via EVENTSPLAYERS_GLOBAL) always show even if markets aren't up yet.
         if is_baseball and (player_df["STATUS"] != "LIVE").all():
-            continue
+            is_roster_player = (player_df["LAST_GAME"] == "roster").any()
+            if not is_roster_player:
+                continue
         has_issue = not ((player_df["STATUS"] == "LIVE").all())
         if issues_only and not has_issue:
             hidden_count += 1
