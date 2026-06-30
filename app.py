@@ -1015,7 +1015,32 @@ def render_competitor_section(event_id: str, league_name: str, player_info: pd.D
             "</div>"
         )
 
-    # ── Arbs — full-width banner matching missing markets ────────────────────
+    # ── Missing — full-width alarm banner (top priority) ─────────────────────
+    if comparison["missing_on_dk"]:
+        missing_sorted = sorted(comparison["missing_on_dk"], key=lambda x: (x["MARKET"], x["PLAYERNAME"]))
+        # Build all items as pill spans
+        pills = "".join(
+            "<span style='display:inline-flex;align-items:center;justify-content:center;gap:6px;"
+            "background:#2d0a0a;border:1px solid #dc2626;border-radius:6px;"
+            "padding:6px 14px;margin:4px;white-space:nowrap;text-align:center'>"
+            "<span style='color:#fca5a5;font-weight:800;font-size:1em'>" + item["PLAYERNAME"] + "</span>"
+            "<span style='color:#6b7280;font-size:0.85em'>—</span>"
+            "<span style='color:#f87171;font-weight:700;font-size:1em'>" + market_short(item["MARKET"]) + "</span>"
+            "</span>"
+            for item in missing_sorted
+        )
+        st.markdown(
+            "<div style='background:#1a0505;border:2px solid #dc2626;border-radius:10px;"
+            "padding:14px 18px;margin:12px 0;width:100%'>"
+            "<div style='font-size:1em;font-weight:800;color:#f87171;letter-spacing:0.04em;"
+            "text-transform:uppercase;margin-bottom:10px;text-align:center'>"
+            "🚨 " + bookmaker + " has these — DK doesn't</div>"
+            "<div style='display:flex;flex-wrap:wrap;justify-content:center'>" + pills + "</div>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+
+    # ── Arbs ──────────────────────────────────────────────────────────────────
     if comparison["arbs"]:
         arb_pills = ""
         for item in comparison["arbs"]:
@@ -1040,31 +1065,6 @@ def render_competitor_section(event_id: str, league_name: str, player_info: pd.D
             "<div style='font-size:1em;font-weight:800;color:#a78bfa;letter-spacing:0.04em;"
             "text-transform:uppercase;margin-bottom:10px;text-align:center'>⚡ Arb opportunities</div>"
             "<div style='display:flex;flex-wrap:wrap;justify-content:center'>" + arb_pills + "</div>"
-            "</div>",
-            unsafe_allow_html=True,
-        )
-
-    # ── Missing — full-width alarm banner ────────────────────────────────────
-    if comparison["missing_on_dk"]:
-        missing_sorted = sorted(comparison["missing_on_dk"], key=lambda x: (x["MARKET"], x["PLAYERNAME"]))
-        # Build all items as pill spans
-        pills = "".join(
-            "<span style='display:inline-flex;align-items:center;justify-content:center;gap:6px;"
-            "background:#2d0a0a;border:1px solid #dc2626;border-radius:6px;"
-            "padding:6px 14px;margin:4px;white-space:nowrap;text-align:center'>"
-            "<span style='color:#fca5a5;font-weight:800;font-size:1em'>" + item["PLAYERNAME"] + "</span>"
-            "<span style='color:#6b7280;font-size:0.85em'>—</span>"
-            "<span style='color:#f87171;font-weight:700;font-size:1em'>" + market_short(item["MARKET"]) + "</span>"
-            "</span>"
-            for item in missing_sorted
-        )
-        st.markdown(
-            "<div style='background:#1a0505;border:2px solid #dc2626;border-radius:10px;"
-            "padding:14px 18px;margin:12px 0;width:100%'>"
-            "<div style='font-size:1em;font-weight:800;color:#f87171;letter-spacing:0.04em;"
-            "text-transform:uppercase;margin-bottom:10px;text-align:center'>"
-            "🚨 " + bookmaker + " has these — DK doesn't</div>"
-            "<div style='display:flex;flex-wrap:wrap;justify-content:center'>" + pills + "</div>"
             "</div>",
             unsafe_allow_html=True,
         )
