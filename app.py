@@ -862,6 +862,75 @@ def render_player_cards(df: pd.DataFrame, player_info: pd.DataFrame, sport_name:
     if hidden_count:
         st.caption(f"{hidden_count} player{'s' if hidden_count > 1 else ''} with all markets live hidden.")
 
+@st.fragment
+def render_competitor_section(event_id: str, league_name: str, player_info: pd.DataFrame):
+    """Runs as an independent fragment so the Odds API call doesn't block the main page."""
+    is_wnba   = "wnba" in league_name.lower()
+    bookmaker = "FanDuel" if is_wnba else "Fanatics"
+
+    home_team = player_info[player_info["TEAM_ORDER"] == 0]["TEAM"].iloc[0] if not player_info.empty else ""
+    away_team = player_info[player_info["TEAM_ORDER"] == 1]["TEAM"].iloc[0] if not player_info.empty else ""
+
+    try:
+        dk_prices   = get_dk_prices(event_id)
+        comp_prices = get_competitor_prices(event_id, league_name, home_team, away_team)
+        comparison  = build_competitor_comparison(dk_prices, comp_prices, league_name)
+    except Exception:
+        comparison = {"missing_on_dk": [], "missing_on_comp": [], "price_gaps": []}
+
+    n_missing_dk = len(comparison["missing_on_dk"])
+    n_price_gaps = len(comparison["price_gaps"])
+
+    if n_missing_dk == 0 and n_price_gaps == 0:
+        return
+
+    with st.expander(
+        f"🔍 vs {bookmaker}  —  "
+        f"{n_missing_dk} markets they have we don't  ·  "
+        f"{n_price_gaps} price gaps ≥20¢",
+        expanded=True
+    ):
+        if comparison["missing_on_dk"]:
+            st.markdown(
+                "<div style='font-size:0.72em;text-transform:uppercase;letter-spacing:0.08em;"
+                "color:#f87171;font-weight:700;margin-bottom:6px'>"
+                + bookmaker + " has, DK doesn't</div>",
+                unsafe_allow_html=True,
+            )
+            for item in comparison["missing_on_dk"]:
+                st.markdown(
+                    "<div style='padding:3px 0;font-size:0.85em'>"
+                    "<span style='color:#f87171;font-weight:600'>" + item["PLAYERNAME"] + "</span>"
+                    "  —  <span style='color:#e5e7eb'>" + item["MARKET"] + "</span>"
+                    "</div>",
+                    unsafe_allow_html=True,
+                )
+
+        if comparison["price_gaps"]:
+            st.markdown(
+                "<div style='font-size:0.72em;text-transform:uppercase;letter-spacing:0.08em;"
+                "color:#fbbf24;font-weight:700;margin:12px 0 6px'>"
+                "Price gaps ≥20¢</div>",
+                unsafe_allow_html=True,
+            )
+            for item in comparison["price_gaps"]:
+                dk_str   = f"{item['DK_ODDS']:+d}"
+                comp_str = f"{item['COMP_ODDS']:+d}"
+                line_str = (f" @ {item['DK_LINE']} vs {item['COMP_LINE']}"
+                            if item["LINE_DIFF"] >= 0.5 else f" @ {item['DK_LINE']}")
+                diff_color = "#f87171" if item["PRICE_DIFF"] >= 30 else "#fbbf24"
+                st.markdown(
+                    "<div style='padding:3px 0;font-size:0.85em;display:flex;gap:12px'>"
+                    "<span style='color:#e5e7eb;min-width:160px;font-weight:600'>" + item["PLAYERNAME"] + "</span>"
+                    "<span style='color:#9ca3af;min-width:200px'>" + item["MARKET"] + " " + item["SIDE"] + line_str + "</span>"
+                    "<span style='color:#16a34a'>DK " + dk_str + "</span>"
+                    "<span style='color:#6b7280'>vs</span>"
+                    "<span style='color:" + diff_color + "'>" + bookmaker + " " + comp_str + "</span>"
+                    "<span style='color:" + diff_color + ";font-weight:700'>(" + str(item["PRICE_DIFF"]) + "¢)</span>"
+                    "</div>",
+                    unsafe_allow_html=True,
+                )
+
 # ── Page: Detail view ─────────────────────────────────────────────────────────
 
 def show_detail(event_row, league_name):
@@ -975,76 +1044,8 @@ def show_detail(event_row, league_name):
                     unsafe_allow_html=True,
                 )
 
-    # ── Competitor comparison ────────────────────────────────────────────────
-    is_wnba    = "wnba" in league_name.lower()
-    bookmaker  = "FanDuel" if is_wnba else "Fanatics"
-    pi         = get_player_info(event_row["EVENTID"])
-    home_team  = pi[pi["TEAM_ORDER"] == 0]["TEAM"].iloc[0] if not pi.empty else ""
-    away_team  = pi[pi["TEAM_ORDER"] == 1]["TEAM"].iloc[0] if not pi.empty else ""
-
-    try:
-        dk_prices   = get_dk_prices(event_row["EVENTID"])
-        comp_prices = get_competitor_prices(
-            event_row["EVENTID"], league_name, home_team, away_team
-        )
-        comparison  = build_competitor_comparison(dk_prices, comp_prices, league_name)
-    except Exception:
-        comparison = {"missing_on_dk": [], "missing_on_comp": [], "price_gaps": []}
-
-    n_missing_dk   = len(comparison["missing_on_dk"])
-    n_price_gaps   = len(comparison["price_gaps"])
-
-    if n_missing_dk > 0 or n_price_gaps > 0:
-        with st.expander(
-            f"🔍 vs {bookmaker}  —  "
-            f"{n_missing_dk} markets they have that we don't  ·  "
-            f"{n_price_gaps} price gaps ≥20¢",
-            expanded=True
-        ):
-            if comparison["missing_on_dk"]:
-                st.markdown(
-                    "<div style='font-size:0.72em;text-transform:uppercase;letter-spacing:0.08em;"
-                    "color:#f87171;font-weight:700;margin-bottom:6px'>"
-                    f"{bookmaker} has, DK doesn't</div>",
-                    unsafe_allow_html=True,
-                )
-                for item in comparison["missing_on_dk"]:
-                    st.markdown(
-                        "<div style='padding:3px 0;font-size:0.85em'>"
-                        "<span style='color:#f87171;font-weight:600'>" + item["PLAYERNAME"] + "</span>"
-                        "  —  <span style='color:#e5e7eb'>" + item["MARKET"] + "</span>"
-                        "</div>",
-                        unsafe_allow_html=True,
-                    )
-
-            if comparison["price_gaps"]:
-                st.markdown(
-                    "<div style='font-size:0.72em;text-transform:uppercase;letter-spacing:0.08em;"
-                    "color:#fbbf24;font-weight:700;margin:12px 0 6px'>"
-                    "Price gaps ≥20¢</div>",
-                    unsafe_allow_html=True,
-                )
-                for item in comparison["price_gaps"]:
-                    dk_str   = f"{item['DK_ODDS']:+d}"
-                    comp_str = f"{item['COMP_ODDS']:+d}"
-                    line_str = (f" @ {item['DK_LINE']} vs {item['COMP_LINE']}"
-                                if item["LINE_DIFF"] >= 0.5 else
-                                f" @ {item['DK_LINE']}")
-                    diff_color = "#f87171" if item["PRICE_DIFF"] >= 30 else "#fbbf24"
-                    st.markdown(
-                        "<div style='padding:3px 0;font-size:0.85em;display:flex;gap:12px'>"
-                        "<span style='color:#e5e7eb;min-width:160px;font-weight:600'>"
-                        + item["PLAYERNAME"] + "</span>"
-                        "<span style='color:#9ca3af;min-width:200px'>"
-                        + item["MARKET"] + " " + item["SIDE"] + line_str + "</span>"
-                        "<span style='color:#16a34a'>DK " + dk_str + "</span>"
-                        "<span style='color:#6b7280'>vs</span>"
-                        "<span style='color:" + diff_color + "'>" + bookmaker + " " + comp_str + "</span>"
-                        "<span style='color:" + diff_color + ";font-weight:700'>"
-                        "(" + str(item["PRICE_DIFF"]) + "¢)</span>"
-                        "</div>",
-                        unsafe_allow_html=True,
-                    )
+    # ── Competitor comparison (loads after main content) ─────────────────────
+    render_competitor_section(event_row["EVENTID"], league_name, player_info)
 
     st.divider()
 
