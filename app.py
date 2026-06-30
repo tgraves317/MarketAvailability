@@ -1184,9 +1184,9 @@ def show_detail(event_row, league_name):
                 st.caption("No markets in this group.")
                 continue
 
-            # Toggle between Market Completion and Players views
-            view_col, toggle_col = st.columns([3, 2])
-            view_choice = toggle_col.radio(
+            # Toggle between Market Completion and Players views — centered
+            _, center_col, _ = st.columns([2, 3, 2])
+            view_choice = center_col.radio(
                 "View", ["Market Completion", "Players"],
                 horizontal=True, label_visibility="collapsed",
                 key=f"view_{grp}"
