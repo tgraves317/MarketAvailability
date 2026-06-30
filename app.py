@@ -1058,18 +1058,20 @@ def render_competitor_section(event_id: str, league_name: str, player_info: pd.D
             unsafe_allow_html=True,
         )
         gap_cols = st.columns(2)
-        for i, item in enumerate(filtered_gaps):
-            line_str   = f"@ {item['LINE']}" if item["LINE"] else ""
-            diff_color = "#f87171" if item["PROB_DIFF"] >= 6 else "#fbbf24"
-            gap_cols[i % 2].markdown(
-                row_html(
-                    item["PLAYERNAME"], item["MARKET"],
-                    item["SIDE"] + " " + line_str,
-                    f"{item['DK_ODDS']:+d}", bookmaker, f"{item['COMP_ODDS']:+d}",
-                    badge=f"({item['PROB_DIFF']}%)", badge_color=diff_color
-                ),
-                unsafe_allow_html=True,
-            )
+        mid = (len(filtered_gaps) + 1) // 2
+        for col_idx, chunk in enumerate([filtered_gaps[:mid], filtered_gaps[mid:]]):
+            for item in chunk:
+                line_str   = f"@ {item['LINE']}" if item["LINE"] else ""
+                diff_color = "#f87171" if item["PROB_DIFF"] >= 6 else "#fbbf24"
+                gap_cols[col_idx].markdown(
+                    row_html(
+                        item["PLAYERNAME"], item["MARKET"],
+                        item["SIDE"] + " " + line_str,
+                        f"{item['DK_ODDS']:+d}", bookmaker, f"{item['COMP_ODDS']:+d}",
+                        badge=f"({item['PROB_DIFF']}%)", badge_color=diff_color
+                    ),
+                    unsafe_allow_html=True,
+                )
 
     # ── Line diffs — two columns, hidden by default ───────────────────────────
     if show_line_diffs and comparison["line_diffs"]:
@@ -1079,8 +1081,10 @@ def render_competitor_section(event_id: str, league_name: str, player_info: pd.D
             unsafe_allow_html=True,
         )
         ld_cols = st.columns(2)
-        for i, item in enumerate(comparison["line_diffs"]):
-            ld_cols[i % 2].markdown(
+        ld_mid = (len(comparison["line_diffs"]) + 1) // 2
+        for col_idx, chunk in enumerate([comparison["line_diffs"][:ld_mid], comparison["line_diffs"][ld_mid:]]):
+            for item in chunk:
+                ld_cols[col_idx].markdown(
                 "<div style='display:grid;grid-template-columns:120px 110px 1fr;gap:6px;"
                 "align-items:center;padding:3px 0;border-bottom:1px solid #1e293b;"
                 "font-size:0.78em;color:#6b7280'>"
