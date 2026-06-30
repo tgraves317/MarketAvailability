@@ -675,10 +675,18 @@ def build_status_df(baselines: pd.DataFrame, current: pd.DataFrame, league_name:
     SCORER_MARKETS = {"1st Points Scorer", "Player First Field Goal Made Type"}
     individual = df[~df["MARKET"].isin(SCORER_MARKETS) & df["GROUP"].isin(["Balanced", "Milestones"])]
     if not individual.empty:
+        # Drop players where all individual markets are REMOVED (ruled out / pulled entirely)
         all_removed = individual.groupby("PLAYERNAME")["STATUS"].apply(lambda s: (s == "REMOVED").all())
         keep = set(all_removed[~all_removed].index)
         players_without_individual = set(df["PLAYERNAME"].unique()) - set(individual["PLAYERNAME"].unique())
         df = df[df["PLAYERNAME"].isin(keep | players_without_individual)]
+
+    # For MLB: also drop players with zero live markets — lineup scratch whose baseline
+    # predates the roster change (all markets show as MISSING, none were ever posted today)
+    if is_mlb and not df.empty:
+        has_any_live = df.groupby("PLAYERNAME")["STATUS"].apply(lambda s: (s == "LIVE").any())
+        df = df[df["PLAYERNAME"].isin(has_any_live[has_any_live].index)]
+
     return df
 
 def compute_group_pcts(baselines: pd.DataFrame, current: pd.DataFrame, league_name: str) -> dict:
@@ -931,7 +939,7 @@ def render_player_cards(df: pd.DataFrame, player_info: pd.DataFrame, sport_name:
     hidden_count = 0
     for player in players:
         player_df = df[df["PLAYERNAME"] == player]
-        if is_baseball and (player_df["STATUS"] == "MISSING").all():
+        if is_baseball and (player_df["STATUS"] != "LIVE").all():
             continue
         has_issue = not ((player_df["STATUS"] == "LIVE").all())
         if issues_only and not has_issue:
