@@ -454,6 +454,10 @@ def build_status_df(baselines: pd.DataFrame, current: pd.DataFrame, league_name:
         if is_wnba:
             bl = bl[~bl["MARKETTYPENAME"].isin(WNBA_EXCLUDED_MARKETS)]
         prop_players = bl[bl["GROUP"].isin(["Balanced", "Milestones"])]["PLAYERNAME"].unique()
+        # Only include players who actually appear in this event's current market data
+        # — removes scratched/ruled-out players whose baseline comes from a prior game
+        players_in_event = set(current["PLAYERNAME"].unique()) if not current.empty else set()
+        prop_players = [p for p in prop_players if p in players_in_event]
         bl = bl[bl["PLAYERNAME"].isin(prop_players)]
 
         for _, row in bl.iterrows():
@@ -490,13 +494,7 @@ def build_status_df(baselines: pd.DataFrame, current: pd.DataFrame, league_name:
                     "STATUS":     status,
                 })
 
-    if not rows:
-        return pd.DataFrame()
-    df = pd.DataFrame(rows)
-    # Drop players where every market is REMOVED — they've been pulled from the event
-    all_removed = df.groupby("PLAYERNAME")["STATUS"].apply(lambda s: (s == "REMOVED").all())
-    active_players = all_removed[~all_removed].index
-    return df[df["PLAYERNAME"].isin(active_players)]
+    return pd.DataFrame(rows) if rows else pd.DataFrame()
 
 STATUS_COLOR = {"LIVE": "#16a34a", "MISSING": "#dc2626", "REMOVED": "#b45309"}
 
