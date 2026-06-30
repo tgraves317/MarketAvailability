@@ -398,46 +398,25 @@ def american_to_prob(a: int) -> float:
     return 100 / (a + 100)
 
 @st.cache_data(ttl=60, show_spinner=False)
-def get_dk_prices(event_id: str) -> pd.DataFrame:
-    """DK's current Over/Under prices per player/market."""
-    return run_query(f"""
-        SELECT DISTINCT
-            mp.PLAYERNAME,
-            m.MARKETTYPENAME,
-            s.SELECTIONNAME,
-            s.POINTS,
-            s.LASTPROBABILITY
-        FROM SPORTSCONTENT.DBO.SELECTIONS s
-        JOIN SPORTSCONTENT.DBO.MARKETS m ON m.MARKETID = s.MARKETID AND m.EVENTID = '{event_id}'
-        JOIN SPORTSCONTENT.DBO.MARKETSPLAYERS_GLOBAL mp ON mp.MARKETID = s.MARKETID AND mp.EVENTID = '{event_id}'
-        WHERE s.EVENTID = '{event_id}'
-          AND s.ISREMOVED = FALSE
-          AND m.ISREMOVED = FALSE
-          AND s.LASTPROBABILITY > 0
-        QUALIFY ROW_NUMBER() OVER (
-            PARTITION BY mp.PLAYERNAME, m.MARKETTYPENAME, s.SELECTIONNAME
-            ORDER BY s.LASTMESSAGETIMESTAMP DESC
-        ) = 1
-    """)
-
-@st.cache_data(ttl=60, show_spinner=False)
-def get_competitor_prices(event_id: str, league_name: str,
-                          home_team: str, away_team: str) -> pd.DataFrame:
+def get_both_book_prices(league_name: str, home_team: str, away_team: str) -> tuple:
     """
-    Fetch competitor player prop prices from Odds API.
-    Returns DataFrame with PLAYERNAME, DK_MARKET, SIDE, LINE, AMERICAN_ODDS.
+    Fetch DK + competitor prices from Odds API in a single request.
+    Returns (dk_df, comp_df) — both with columns PLAYERNAME, DK_MARKET, SIDE, LINE, AMERICAN_ODDS.
+    Odds API prices are live (~2-5 min fresh), unlike Snowflake SELECTIONS which can lag hours.
     """
     import urllib.request, json
 
-    api_key = st.secrets["odds_api"]["key"]
-    is_wnba = "wnba" in league_name.lower()
-
+    api_key    = st.secrets["odds_api"]["key"]
+    is_wnba    = "wnba" in league_name.lower()
     sport      = "basketball_wnba" if is_wnba else "baseball_mlb"
-    bookmaker  = "fanduel"          if is_wnba else "fanatics"
-    market_map = WNBA_MARKET_MAP    if is_wnba else MLB_MARKET_MAP
+    comp_book  = "fanduel"         if is_wnba else "fanatics"
+    market_map = WNBA_MARKET_MAP   if is_wnba else MLB_MARKET_MAP
     markets_str = ",".join(market_map.keys())
 
-    # Find matching Odds API event by team name similarity
+    def team_match(t1: str, t2: str) -> bool:
+        t1, t2 = t1.lower(), t2.lower()
+        return t1.split()[-1] in t2 or t2.split()[-1] in t1
+
     try:
         req = urllib.request.urlopen(
             f"https://api.the-odds-api.com/v4/sports/{sport}/events/?apiKey={api_key}",
@@ -445,52 +424,48 @@ def get_competitor_prices(event_id: str, league_name: str,
         )
         events = json.loads(req.read())
     except Exception:
-        return pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame()
 
-    # Match by checking if either team name appears in the other
-    def team_match(t1: str, t2: str) -> bool:
-        t1, t2 = t1.lower(), t2.lower()
-        t1_last = t1.split()[-1]
-        t2_last = t2.split()[-1]
-        return t1_last in t2 or t2_last in t1
-
-    odds_event = None
-    for ev in events:
-        if (team_match(home_team, ev["home_team"]) or team_match(home_team, ev["away_team"])) and \
-           (team_match(away_team, ev["home_team"]) or team_match(away_team, ev["away_team"])):
-            odds_event = ev
-            break
+    odds_event = next((
+        ev for ev in events
+        if (team_match(home_team, ev["home_team"]) or team_match(home_team, ev["away_team"])) and
+           (team_match(away_team, ev["home_team"]) or team_match(away_team, ev["away_team"]))
+    ), None)
 
     if not odds_event:
-        return pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame()
 
     try:
         url = (f"https://api.the-odds-api.com/v4/sports/{sport}/events/{odds_event['id']}/odds"
-               f"?apiKey={api_key}&regions=us&bookmakers={bookmaker}"
+               f"?apiKey={api_key}&regions=us&bookmakers=draftkings,{comp_book}"
                f"&markets={markets_str}&oddsFormat=american")
         req = urllib.request.urlopen(url, timeout=10)
         data = json.loads(req.read())
     except Exception:
-        return pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame()
 
-    rows = []
+    dk_rows, comp_rows = [], []
     for bk in data.get("bookmakers", []):
-        if bk["key"] != bookmaker:
+        target = dk_rows if bk["key"] == "draftkings" else comp_rows if bk["key"] == comp_book else None
+        if target is None:
             continue
         for mkt in bk["markets"]:
             dk_market = market_map.get(mkt["key"])
             if not dk_market:
                 continue
             for outcome in mkt["outcomes"]:
-                rows.append({
-                    "PLAYERNAME":   outcome["description"],
-                    "DK_MARKET":    dk_market,
-                    "SIDE":         outcome["name"],   # Over / Under / Yes / No
-                    "LINE":         outcome.get("point"),
+                target.append({
+                    "PLAYERNAME":    outcome["description"],
+                    "DK_MARKET":     dk_market,
+                    "SIDE":          outcome["name"],
+                    "LINE":          outcome.get("point"),
                     "AMERICAN_ODDS": int(outcome["price"]),
                 })
 
-    return pd.DataFrame(rows) if rows else pd.DataFrame()
+    return (
+        pd.DataFrame(dk_rows)   if dk_rows   else pd.DataFrame(),
+        pd.DataFrame(comp_rows) if comp_rows else pd.DataFrame(),
+    )
 
 def build_competitor_comparison(dk_prices: pd.DataFrame,
                                 comp_prices: pd.DataFrame,
@@ -510,16 +485,15 @@ def build_competitor_comparison(dk_prices: pd.DataFrame,
     dk_markets = WNBA_MARKET_MAP if is_wnba else MLB_MARKET_MAP
 
     # Build DK lookup: (player, market, side) → (line, american_odds)
+    # dk_prices now comes from Odds API — already has AMERICAN_ODDS, SIDE, LINE, DK_MARKET
     dk_lookup = {}
     if not dk_prices.empty:
         for _, row in dk_prices.iterrows():
-            side = str(row["SELECTIONNAME"]).split()[0]  # "Over" or "Under"
-            american = prob_to_american(float(row["LASTPROBABILITY"]))
-            key = (row["PLAYERNAME"], row["MARKETTYPENAME"], side)
-            dk_lookup[key] = (row["POINTS"], american)
+            key = (row["PLAYERNAME"], row["DK_MARKET"], row["SIDE"])
+            dk_lookup[key] = (row["LINE"], row["AMERICAN_ODDS"])
 
-    # DK player+market set (live markets only from dk_prices)
-    dk_set = {(r["PLAYERNAME"], r["MARKETTYPENAME"]) for _, r in dk_prices.iterrows()} if not dk_prices.empty else set()
+    # DK player+market set
+    dk_set = {(r["PLAYERNAME"], r["DK_MARKET"]) for _, r in dk_prices.iterrows()} if not dk_prices.empty else set()
 
     # Competitor player+market set
     comp_set = {(r["PLAYERNAME"], r["DK_MARKET"]) for _, r in comp_prices.iterrows()}
@@ -528,8 +502,8 @@ def build_competitor_comparison(dk_prices: pd.DataFrame,
     for player, market in sorted(comp_set - dk_set):
         result["missing_on_dk"].append({"PLAYERNAME": player, "MARKET": market, "SOURCE": bookmaker})
 
-    # Missing on competitor — DK has it, competitor doesn't (only for mapped markets)
-    dk_mapped_set = {(p, m) for p, m in dk_set if m in dk_markets.values()}
+    # Missing on competitor — DK has it, competitor doesn't
+    dk_mapped_set = dk_set  # already filtered to mapped markets via Odds API
     for player, market in sorted(dk_mapped_set - comp_set):
         result["missing_on_comp"].append({"PLAYERNAME": player, "MARKET": market, "SOURCE": bookmaker})
 
@@ -975,9 +949,8 @@ def render_competitor_section(event_id: str, league_name: str, player_info: pd.D
     away_team = player_info[player_info["TEAM_ORDER"] == 1]["TEAM"].iloc[0] if not player_info.empty else ""
 
     try:
-        dk_prices   = get_dk_prices(event_id)
-        comp_prices = get_competitor_prices(event_id, league_name, home_team, away_team)
-        comparison  = build_competitor_comparison(dk_prices, comp_prices, league_name)
+        dk_prices, comp_prices = get_both_book_prices(league_name, home_team, away_team)
+        comparison = build_competitor_comparison(dk_prices, comp_prices, league_name)
     except Exception:
         comparison = {"missing_on_dk": [], "missing_on_comp": [], "price_gaps": [], "line_diffs": [], "arbs": []}
 
@@ -995,7 +968,7 @@ def render_competitor_section(event_id: str, league_name: str, player_info: pd.D
                + "  ·  ".join(parts) + "</span>" if parts else "") +
             "</div>"
             "<div style='font-size:0.68em;color:#4b5563;margin-top:2px'>"
-            "DK prices from Snowflake — pipeline lag can be significant; use for direction only</div>",
+            "Prices via Odds API — ~2-5 min fresh for both books</div>",
             unsafe_allow_html=True,
         )
     with ctrl_col:
