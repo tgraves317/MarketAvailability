@@ -1016,24 +1016,30 @@ def render_competitor_section(event_id: str, league_name: str, player_info: pd.D
                 unsafe_allow_html=True,
             )
 
-    # ── Missing — full width, prominent ──────────────────────────────────────
+    # ── Missing — full-width alarm banner ────────────────────────────────────
     if comparison["missing_on_dk"]:
+        missing_sorted = sorted(comparison["missing_on_dk"], key=lambda x: (x["MARKET"], x["PLAYERNAME"]))
+        # Build all items as pill spans
+        pills = "".join(
+            "<span style='display:inline-flex;align-items:center;gap:6px;"
+            "background:#2d0a0a;border:1px solid #dc2626;border-radius:6px;"
+            "padding:6px 14px;margin:4px;white-space:nowrap'>"
+            "<span style='color:#fca5a5;font-weight:800;font-size:1em'>" + item["PLAYERNAME"] + "</span>"
+            "<span style='color:#6b7280;font-size:0.85em'>—</span>"
+            "<span style='color:#f87171;font-weight:700;font-size:1em'>" + market_short(item["MARKET"]) + "</span>"
+            "</span>"
+            for item in missing_sorted
+        )
         st.markdown(
-            "<div style='font-size:0.8em;font-weight:700;color:#f87171;margin:12px 0 6px'>"
-            "🚨 " + bookmaker + " has, DK doesn't</div>",
+            "<div style='background:#1a0505;border:2px solid #dc2626;border-radius:10px;"
+            "padding:14px 18px;margin:12px 0;width:100%'>"
+            "<div style='font-size:1em;font-weight:800;color:#f87171;letter-spacing:0.04em;"
+            "text-transform:uppercase;margin-bottom:10px'>"
+            "🚨 " + bookmaker + " has these — DK doesn't</div>"
+            "<div style='display:flex;flex-wrap:wrap'>" + pills + "</div>"
+            "</div>",
             unsafe_allow_html=True,
         )
-        missing_sorted = sorted(comparison["missing_on_dk"], key=lambda x: (x["MARKET"], x["PLAYERNAME"]))
-        miss_cols = st.columns(2)
-        for i, item in enumerate(missing_sorted):
-            miss_cols[i % 2].markdown(
-                "<div style='display:flex;gap:12px;align-items:center;padding:5px 0;"
-                "border-bottom:1px solid #1e293b;font-size:0.88em'>"
-                "<span style='color:#fca5a5;font-weight:700;min-width:140px'>" + item["PLAYERNAME"] + "</span>"
-                "<span style='color:#f87171;font-weight:600'>" + market_short(item["MARKET"]) + "</span>"
-                "</div>",
-                unsafe_allow_html=True,
-            )
 
     # ── Price gaps — two columns ──────────────────────────────────────────────
     if filtered_gaps:
