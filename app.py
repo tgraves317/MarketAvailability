@@ -98,8 +98,19 @@ def classify_market(name: str) -> str:
     return "Other"
 
 GROUP_ORDER      = ["Balanced", "Milestones", "Team", "H2H", "Other"]
+# MLB splits Balanced/Milestones into pitcher vs batter sub-groups
+MLB_GROUP_ORDER  = ["Batter Balanced", "Batter Milestones", "Pitcher Balanced", "Pitcher Milestones", "Other"]
+
+MLB_PITCHER_MARKETS = {
+    "Strikeouts Thrown O/U", "Strikeouts Thrown Milestones",
+    "Earned Runs Allowed O/U", "Earned Runs Allowed (X or Fewer)",
+    "Hits Allowed O/U", "Hits Allowed (X or Fewer)",
+    "Walks Allowed O/U", "Walks Allowed (X or Fewer)",
+    "Hits Allowed + Walks Allowed + Earned Runs Allowed O/U",
+    "Hits Allowed + Walks Allowed + Earned Runs Allowed (X or Fewer)",
+    "Outs O/U",
+}
 DEFAULT_GROUPS   = ["Balanced", "Milestones"]
-# Groups shown by default in the detail tabs
 DETAIL_DEFAULT_GROUPS = ["Balanced", "Milestones"]
 
 WNBA_MARKET_STAT_ORDER = [
@@ -699,6 +710,17 @@ def build_status_df(baselines: pd.DataFrame, current: pd.DataFrame, league_name:
         has_any_live = df.groupby("PLAYERNAME")["STATUS"].apply(lambda s: (s == "LIVE").any())
         df = df[df["PLAYERNAME"].isin(has_any_live[has_any_live].index)]
 
+    # For MLB: split Balanced/Milestones into Batter/Pitcher sub-groups
+    if is_mlb and not df.empty:
+        def mlb_group(row):
+            is_pitcher = row["MARKET"] in MLB_PITCHER_MARKETS
+            if row["GROUP"] == "Balanced":
+                return "Pitcher Balanced" if is_pitcher else "Batter Balanced"
+            if row["GROUP"] == "Milestones":
+                return "Pitcher Milestones" if is_pitcher else "Batter Milestones"
+            return row["GROUP"]
+        df["GROUP"] = df.apply(mlb_group, axis=1)
+
     return df
 
 def compute_group_pcts(baselines: pd.DataFrame, current: pd.DataFrame, league_name: str) -> dict:
@@ -809,7 +831,8 @@ def render_market_completion(df: pd.DataFrame, league_name: str = ""):
             summary[c] = 0
     summary["TOTAL"] = summary["LIVE"] + summary["MISSING"] + summary["REMOVED"]
     summary["PCT"]   = summary["LIVE"] / summary["TOTAL"].replace(0, 1)
-    summary["GORD"]  = summary["GROUP"].apply(lambda g: GROUP_ORDER.index(g) if g in GROUP_ORDER else 99)
+    active_order = MLB_GROUP_ORDER if "mlb" in league_name.lower() else GROUP_ORDER
+    summary["GORD"]  = summary["GROUP"].apply(lambda g: active_order.index(g) if g in active_order else 99)
     is_wnba = "wnba" in league_name.lower()
     if is_wnba:
         summary["MORD"] = summary["MARKET"].apply(_wnba_market_sort_key)
@@ -1227,9 +1250,15 @@ def show_detail(event_row, league_name):
     st.divider()
 
     # ── Group market tabs ────────────────────────────────────────────────────
-    all_groups = [g for g in GROUP_ORDER if g in df["GROUP"].unique()]
-    ordered_groups = [g for g in DETAIL_DEFAULT_GROUPS if g in all_groups] + \
-                     [g for g in all_groups if g not in DETAIL_DEFAULT_GROUPS]
+    is_mlb_view = "mlb" in league_name.lower()
+    group_order_for_league = MLB_GROUP_ORDER if is_mlb_view else GROUP_ORDER
+    default_groups_for_league = (
+        ["Batter Balanced", "Batter Milestones", "Pitcher Balanced", "Pitcher Milestones"]
+        if is_mlb_view else DETAIL_DEFAULT_GROUPS
+    )
+    all_groups = [g for g in group_order_for_league if g in df["GROUP"].unique()]
+    ordered_groups = [g for g in default_groups_for_league if g in all_groups] + \
+                     [g for g in all_groups if g not in default_groups_for_league]
 
     tab_labels = []
     for g in ordered_groups:
