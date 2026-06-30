@@ -454,9 +454,17 @@ def build_status_df(baselines: pd.DataFrame, current: pd.DataFrame, league_name:
         if is_wnba:
             bl = bl[~bl["MARKETTYPENAME"].isin(WNBA_EXCLUDED_MARKETS)]
         prop_players = bl[bl["GROUP"].isin(["Balanced", "Milestones"])]["PLAYERNAME"].unique()
-        # Only include players who actually appear in this event's current market data
-        # — removes scratched/ruled-out players whose baseline comes from a prior game
-        players_in_event = set(current["PLAYERNAME"].unique()) if not current.empty else set()
+        # Only include players who have at least one live individual prop (Balanced or Milestones)
+        # — 1st Points Scorer / team markets keep scratched players in the feed so we can't
+        #   use any-market presence; must require a live O/U or Milestone
+        if not current.empty:
+            live_individual = current[
+                (current["IS_LIVE"] == 1) &
+                (current["MARKETTYPENAME"].apply(classify_market).isin(["Balanced", "Milestones"]))
+            ]["PLAYERNAME"].unique()
+            players_in_event = set(live_individual)
+        else:
+            players_in_event = set()
         prop_players = [p for p in prop_players if p in players_in_event]
         bl = bl[bl["PLAYERNAME"].isin(prop_players)]
 
