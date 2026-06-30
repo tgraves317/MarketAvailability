@@ -323,19 +323,43 @@ def get_player_info(event_id: str) -> pd.DataFrame:
 
 @st.cache_data(ttl=30, show_spinner=False)
 def get_activity_feed(event_id: str, minutes: int = 30) -> pd.DataFrame:
-    """Markets published, removed, or frozen in the last N minutes for this event."""
+    """
+    One row per (market type, action) change in the last N minutes.
+    Shows how many players are affected rather than repeating per player.
+    """
     return run_query(f"""
+        WITH latest_per_market AS (
+            SELECT
+                m.MARKETID,
+                m.MARKETTYPENAME,
+                m.ISREMOVED,
+                m.FIRSTMESSAGETIMESTAMP,
+                m.LASTMESSAGETIMESTAMP,
+                ROW_NUMBER() OVER (
+                    PARTITION BY m.MARKETTYPENAME, m.ISREMOVED
+                    ORDER BY GREATEST(m.FIRSTMESSAGETIMESTAMP, m.LASTMESSAGETIMESTAMP) DESC
+                ) AS rn
+            FROM SPORTSCONTENT.DBO.MARKETS m
+            WHERE m.EVENTID = '{event_id}'
+              AND GREATEST(m.FIRSTMESSAGETIMESTAMP, m.LASTMESSAGETIMESTAMP)
+                  >= DATEADD('minute', -{minutes}, CURRENT_TIMESTAMP)
+        ),
+        deduped AS (
+            SELECT MARKETID, MARKETTYPENAME, ISREMOVED,
+                   GREATEST(FIRSTMESSAGETIMESTAMP, LASTMESSAGETIMESTAMP) AS CHANGED_AT
+            FROM latest_per_market
+            WHERE rn = 1
+        )
         SELECT
-            mp.PLAYERNAME,
-            m.MARKETTYPENAME,
-            CASE WHEN m.ISREMOVED = TRUE THEN 'REMOVED' ELSE 'PUBLISHED' END AS ACTION,
-            GREATEST(m.FIRSTMESSAGETIMESTAMP, m.LASTMESSAGETIMESTAMP) AS CHANGED_AT
-        FROM SPORTSCONTENT.DBO.MARKETSPLAYERS_GLOBAL mp
-        JOIN SPORTSCONTENT.DBO.MARKETS m ON m.MARKETID = mp.MARKETID AND m.EVENTID = '{event_id}'
-        WHERE mp.EVENTID = '{event_id}'
-          AND GREATEST(m.FIRSTMESSAGETIMESTAMP, m.LASTMESSAGETIMESTAMP)
-              >= DATEADD('minute', -{minutes}, CURRENT_TIMESTAMP)
-        ORDER BY CHANGED_AT DESC
+            d.MARKETTYPENAME,
+            CASE WHEN d.ISREMOVED = TRUE THEN 'REMOVED' ELSE 'PUBLISHED' END AS ACTION,
+            d.CHANGED_AT,
+            COUNT(DISTINCT mp.PLAYERNAME) AS PLAYER_COUNT
+        FROM deduped d
+        JOIN SPORTSCONTENT.DBO.MARKETSPLAYERS_GLOBAL mp
+            ON mp.MARKETID = d.MARKETID AND mp.EVENTID = '{event_id}'
+        GROUP BY d.MARKETTYPENAME, d.ISREMOVED, d.CHANGED_AT
+        ORDER BY d.CHANGED_AT DESC
     """)
 
 # ── Build helpers ─────────────────────────────────────────────────────────────
@@ -380,29 +404,36 @@ OU_MILESTONE_PAIRS = {
     "Strikeouts O/U":                   "Strikeouts Milestones",
 }
 
-def get_pairing_flags(df: pd.DataFrame) -> pd.DataFrame:
+def get_pairing_flags(df: pd.DataFrame) -> tuple:
     """
-    Returns rows where a player has an O/U live but the paired Milestone
-    is missing or removed (and vice versa).
+    Returns (urgent_flags, fyi_flags) DataFrames.
+    urgent = O/U live but Milestone not live (bettor can bet the line but not milestones)
+    fyi    = Milestone live but O/U not live (less critical)
     """
     if df.empty:
-        return pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame()
     status_map = df.groupby(["PLAYERNAME", "MARKET"])["STATUS"].first().to_dict()
-    flags = []
+    urgent, fyi = [], []
     for player in df["PLAYERNAME"].unique():
         for ou, mile in OU_MILESTONE_PAIRS.items():
             ou_status   = status_map.get((player, ou))
             mile_status = status_map.get((player, mile))
-            # Only flag if at least one side exists in the baseline
             if ou_status is None and mile_status is None:
                 continue
             if ou_status == "LIVE" and mile_status != "LIVE":
-                flags.append({"PLAYERNAME": player, "MARKET": ou,
-                               "PAIRED_WITH": mile, "ISSUE": f"{ou} live but {mile} {mile_status or 'missing'}"})
+                urgent.append({
+                    "PLAYERNAME": player,
+                    "ISSUE": f"{ou} ✓  →  {mile} {mile_status or 'not posted'}",
+                })
             elif mile_status == "LIVE" and ou_status != "LIVE":
-                flags.append({"PLAYERNAME": player, "MARKET": mile,
-                               "PAIRED_WITH": ou, "ISSUE": f"{mile} live but {ou} {ou_status or 'missing'}"})
-    return pd.DataFrame(flags) if flags else pd.DataFrame()
+                fyi.append({
+                    "PLAYERNAME": player,
+                    "ISSUE": f"{mile} ✓  →  {ou} {ou_status or 'not posted'}",
+                })
+    return (
+        pd.DataFrame(urgent) if urgent else pd.DataFrame(),
+        pd.DataFrame(fyi)    if fyi    else pd.DataFrame(),
+    )
 
 def build_status_df(baselines: pd.DataFrame, current: pd.DataFrame, league_name: str,
                     player_info: pd.DataFrame = None) -> pd.DataFrame:
@@ -736,31 +767,42 @@ def show_detail(event_row, league_name):
     except Exception:
         activity = pd.DataFrame()
 
-    pair_flags = get_pairing_flags(df)
+    urgent_flags, fyi_flags = get_pairing_flags(df)
 
     # ── Summary counts (REMOVED counts as not-live) ───────────────────────────
     filtered = df.copy()
     live    = int((filtered["STATUS"] == "LIVE").sum())
     missing = int((filtered["STATUS"] == "MISSING").sum())
     removed = int((filtered["STATUS"] == "REMOVED").sum())
-    not_live = missing + removed
     total   = int(len(filtered))
 
     cols_sum = st.columns([1, 1, 1, 1, 1])
-    cols_sum[0].metric("Live",     live)
-    cols_sum[1].metric("Missing",  missing)
-    cols_sum[2].metric("Removed",  removed)
-    cols_sum[3].metric("Pair gaps", len(pair_flags))
-    cols_sum[4].metric("Total",    total)
+    cols_sum[0].metric("Live",       live)
+    cols_sum[1].metric("Missing",    missing)
+    cols_sum[2].metric("Removed",    removed)
+    cols_sum[3].metric("Line/Mile gaps", len(urgent_flags))
+    cols_sum[4].metric("Total",      total)
 
-    # ── Alerts: pairing flags ─────────────────────────────────────────────────
-    if not pair_flags.empty:
-        with st.expander(f"⚠️ O/U ↔ Milestone gaps ({len(pair_flags)})", expanded=True):
-            for _, row in pair_flags.iterrows():
+    # ── Urgent pairing flags: O/U live, Milestone not ────────────────────────
+    if not urgent_flags.empty:
+        with st.expander(f"⚠️ Line posted, Milestone missing ({len(urgent_flags)})", expanded=True):
+            for _, row in urgent_flags.iterrows():
+                st.markdown(
+                    "<div style='padding:4px 0;font-size:0.85em'>"
+                    "<span style='color:#f87171;font-weight:700'>" + row["PLAYERNAME"] + "</span>"
+                    "  —  <span style='color:#e5e7eb'>" + row["ISSUE"] + "</span>"
+                    "</div>",
+                    unsafe_allow_html=True,
+                )
+
+    # ── FYI pairing flags: Milestone live, O/U not ───────────────────────────
+    if not fyi_flags.empty:
+        with st.expander(f"ℹ️ Milestone posted, Line missing ({len(fyi_flags)})", expanded=False):
+            for _, row in fyi_flags.iterrows():
                 st.markdown(
                     "<div style='padding:4px 0;font-size:0.85em'>"
                     "<span style='color:#fbbf24;font-weight:700'>" + row["PLAYERNAME"] + "</span>"
-                    "  —  " + row["ISSUE"] +
+                    "  —  <span style='color:#9ca3af'>" + row["ISSUE"] + "</span>"
                     "</div>",
                     unsafe_allow_html=True,
                 )
@@ -770,14 +812,15 @@ def show_detail(event_row, league_name):
         PT = pytz.timezone("America/Los_Angeles")
         activity["CHANGED_AT_PT"] = pd.to_datetime(activity["CHANGED_AT"]).dt.tz_localize("UTC").dt.tz_convert(PT)
         with st.expander(f"📋 Recent activity — last 30 min ({len(activity)} changes)", expanded=False):
-            for _, row in activity.head(50).iterrows():
-                color  = "#16a34a" if row["ACTION"] == "PUBLISHED" else "#dc2626"
-                ts     = row["CHANGED_AT_PT"].strftime("%I:%M:%S %p")
+            for _, row in activity.iterrows():
+                color      = "#16a34a" if row["ACTION"] == "PUBLISHED" else "#dc2626"
+                ts         = row["CHANGED_AT_PT"].strftime("%I:%M %p")
+                player_str = f"  <span style='color:#6b7280'>({int(row['PLAYER_COUNT'])} players)</span>"
                 st.markdown(
-                    "<div style='padding:3px 0;font-size:0.82em;display:flex;gap:12px'>"
-                    "<span style='color:#6b7280;min-width:70px'>" + ts + "</span>"
+                    "<div style='padding:3px 0;font-size:0.82em;display:flex;gap:12px;align-items:center'>"
+                    "<span style='color:#6b7280;min-width:60px'>" + ts + "</span>"
                     "<span style='color:" + color + ";font-weight:600;min-width:80px'>" + row["ACTION"] + "</span>"
-                    "<span style='color:#e5e7eb'>" + row["PLAYERNAME"] + "  —  " + row["MARKETTYPENAME"] + "</span>"
+                    "<span style='color:#e5e7eb'>" + row["MARKETTYPENAME"] + player_str + "</span>"
                     "</div>",
                     unsafe_allow_html=True,
                 )
