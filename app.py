@@ -6,6 +6,15 @@ from streamlit_autorefresh import st_autorefresh
 
 st.set_page_config(page_title="Market Availability", layout="wide")
 
+st.markdown("""
+<style>
+/* Center radio button options globally */
+div[data-testid="stRadio"] > div[role="radiogroup"] {
+    justify-content: center;
+}
+</style>
+""", unsafe_allow_html=True)
+
 # ── League config ────────────────────────────────────────────────────────────
 
 LEAGUES = {
@@ -1034,7 +1043,7 @@ def render_competitor_section(event_id: str, league_name: str, player_info: pd.D
             "<div style='background:#1a0505;border:2px solid #dc2626;border-radius:10px;"
             "padding:14px 18px;margin:12px 0;width:100%'>"
             "<div style='font-size:1em;font-weight:800;color:#f87171;letter-spacing:0.04em;"
-            "text-transform:uppercase;margin-bottom:10px'>"
+            "text-transform:uppercase;margin-bottom:10px;text-align:center'>"
             "🚨 " + bookmaker + " has these — DK doesn't</div>"
             "<div style='display:flex;flex-wrap:wrap;justify-content:center'>" + pills + "</div>"
             "</div>",
@@ -1130,17 +1139,14 @@ def show_detail(event_row, league_name):
     m1.markdown(
         "<div>"
         "<div style='font-size:0.75em;color:#9ca3af;font-weight:600;text-transform:uppercase;"
-        "letter-spacing:0.05em'>Missing</div>"
+        "letter-spacing:0.05em'>Never posted</div>"
         "<div style='font-size:2.2em;font-weight:800;color:" + miss_color + ";line-height:1.1'>"
         + str(missing) + "</div>"
-        "<div style='font-size:0.75em;color:#6b7280'>of " + str(total) + " expected</div>"
+        "<div style='font-size:0.75em;color:#6b7280'>" + str(removed) + " pulled  ·  " + str(total) + " expected</div>"
         "</div>",
         unsafe_allow_html=True,
     )
     m2.metric("Live", live)
-    # Only show Removed if >0; label makes clear these are pulled markets not gaps
-    if removed > 0:
-        m3.metric("Removed (pulled)", removed)
     if len(urgent_flags) > 0:
         m4.metric("Line/Mile gaps", len(urgent_flags))
     m5.metric("Total", total)
@@ -1185,20 +1191,10 @@ def show_detail(event_row, league_name):
                 continue
 
             # Toggle between Market Completion and Players views — centered
-            st.markdown(
-                "<style>div[data-testid='stHorizontalBlock']:has(div[data-testid='stRadio']) "
-                "{ justify-content: center; }</style>",
-                unsafe_allow_html=True,
-            )
-            _, center_col, _ = st.columns([2, 3, 2])
-            view_choice = center_col.radio(
+            view_choice = st.radio(
                 "View", ["Market Completion", "Players"],
                 horizontal=True, label_visibility="collapsed",
                 key=f"view_{grp}"
-            )
-            st.markdown(
-                "<style>div[data-testid='stRadio'] > div { justify-content: center; }</style>",
-                unsafe_allow_html=True,
             )
 
             if view_choice == "Market Completion":
