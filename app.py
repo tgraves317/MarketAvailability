@@ -34,7 +34,7 @@ MLB_EXCLUDED_MARKETS = {
     "Combined Pitcher Earned Runs Allowed (X or Fewer)",
     "Combined Pitcher Strikeouts Thrown",
     "Either Pitcher Hits Allowed (X or Fewer)",
-    "Either Pitcher Earned Runs Allowed (X or Fewer)",
+    "Either Pitcher Earned Runs Allowed (X or Fewer)",.
     "Walks Allowed (X or Fewer)",
     "Hits Allowed + Walks Allowed + Earned Runs Allowed (X or Fewer)",
     "Outs O/U",
@@ -134,8 +134,7 @@ def fmt_countdown(start_pt, now_pt):
 
 # ── Snowflake ────────────────────────────────────────────────────────────────
 
-@st.cache_resource
-def get_connection():
+def _new_connection():
     return snowflake.connector.connect(
         account="DRAFTKINGS-DRAFTKINGS",
         user="T.GRAVES",
@@ -146,11 +145,23 @@ def get_connection():
         network_timeout=60,
     )
 
+@st.cache_resource
+def get_connection():
+    return _new_connection()
+
 def run_query(sql: str) -> pd.DataFrame:
     conn = get_connection()
-    cur  = conn.cursor()
-    cur.execute(sql)
-    return pd.DataFrame(cur.fetchall(), columns=[d[0] for d in cur.description])
+    try:
+        cur = conn.cursor()
+        cur.execute(sql)
+        return pd.DataFrame(cur.fetchall(), columns=[d[0] for d in cur.description])
+    except Exception:
+        # Connection expired — clear the cache and reconnect once
+        get_connection.clear()
+        conn = get_connection()
+        cur  = conn.cursor()
+        cur.execute(sql)
+        return pd.DataFrame(cur.fetchall(), columns=[d[0] for d in cur.description])
 
 # ── Data queries ─────────────────────────────────────────────────────────────
 
