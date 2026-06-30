@@ -1126,7 +1126,64 @@ def show_detail(event_row, league_name):
         m4.metric("Line/Mile gaps", len(urgent_flags))
     m5.metric("Total", total)
 
-    # ── Activity feed (most urgent — what just changed) ───────────────────────
+    # ── Competitor comparison (loads async, always visible) ──────────────────
+    render_competitor_section(event_row["EVENTID"], league_name, player_info)
+
+    # ── Line posted, Milestone missing (urgent — stays up top) ───────────────
+    if not urgent_flags.empty:
+        with st.expander(f"⚠️ Line posted, Milestone missing ({len(urgent_flags)})", expanded=True):
+            for _, row in urgent_flags.iterrows():
+                st.markdown(
+                    "<div style='padding:4px 0;font-size:0.85em'>"
+                    "<span style='color:#f87171;font-weight:700'>" + row["PLAYERNAME"] + "</span>"
+                    "  —  <span style='color:#e5e7eb'>" + row["ISSUE"] + "</span></div>",
+                    unsafe_allow_html=True,
+                )
+
+    st.divider()
+
+    # ── Group market tabs ────────────────────────────────────────────────────
+    all_groups = [g for g in GROUP_ORDER if g in df["GROUP"].unique()]
+    ordered_groups = [g for g in DETAIL_DEFAULT_GROUPS if g in all_groups] + \
+                     [g for g in all_groups if g not in DETAIL_DEFAULT_GROUPS]
+
+    tab_labels = []
+    for g in ordered_groups:
+        grp_df  = df[df["GROUP"] == g]
+        n_live  = int((grp_df["STATUS"] == "LIVE").sum())
+        n_miss  = int((grp_df["STATUS"] == "MISSING").sum())
+        n_rem   = int((grp_df["STATUS"] == "REMOVED").sum())
+        n_total = int(len(grp_df))
+        badge   = "  ❌" if n_miss else ("  🟡" if n_rem else "  ✅")
+        tab_labels.append(g + f"{badge} {n_live}/{n_total}")
+
+    grp_tabs = st.tabs(tab_labels)
+    for tab, grp in zip(grp_tabs, ordered_groups):
+        with tab:
+            grp_df = df[df["GROUP"] == grp]
+            if grp_df.empty:
+                st.caption("No markets in this group.")
+                continue
+
+            # Toggle between Market Completion and Players views
+            view_col, toggle_col = st.columns([3, 2])
+            view_choice = toggle_col.radio(
+                "View", ["Market Completion", "Players"],
+                horizontal=True, label_visibility="collapsed",
+                key=f"view_{grp}"
+            )
+
+            if view_choice == "Market Completion":
+                render_market_completion(grp_df, league_name)
+            else:
+                p_col, t_col = st.columns([3, 2])
+                p_col.markdown("##### Players")
+                issues_only = t_col.toggle("Issues only", value=False, key=f"issues_{grp}")
+                render_player_cards(grp_df, player_info, league_name, issues_only)
+
+    st.divider()
+
+    # ── Bottom section: activity feed + FYI flags (collapsed) ────────────────
     try:
         activity = get_activity_feed(event_row["EVENTID"])
     except Exception:
@@ -1135,15 +1192,14 @@ def show_detail(event_row, league_name):
     if not activity.empty:
         PT = pytz.timezone("America/Los_Angeles")
         activity["CHANGED_AT_PT"] = pd.to_datetime(activity["CHANGED_AT"]).dt.tz_localize("UTC").dt.tz_convert(PT)
-        with st.expander(f"📋 Recent activity — last 30 min ({len(activity)} changes)", expanded=True):
+        with st.expander(f"📋 Recent activity — last 30 min ({len(activity)} changes)", expanded=False):
             for _, row in activity.iterrows():
-                action      = str(row["ACTION"])
+                action       = str(row["ACTION"])
                 action_color = "#16a34a" if action == "PUBLISHED" else "#dc2626"
-                ts          = row["CHANGED_AT_PT"].strftime("%I:%M %p")
-                players     = str(row["PLAYERS"]) if row["PLAYERS"] else ""
-                # Color market name by group importance
-                mkt_grp     = classify_market(str(row["MARKETTYPENAME"]))
-                mkt_color   = "#e5e7eb" if mkt_grp in ("Balanced", "Milestones") else "#6b7280"
+                ts           = row["CHANGED_AT_PT"].strftime("%I:%M %p")
+                players      = str(row["PLAYERS"]) if row["PLAYERS"] else ""
+                mkt_grp      = classify_market(str(row["MARKETTYPENAME"]))
+                mkt_color    = "#e5e7eb" if mkt_grp in ("Balanced", "Milestones") else "#6b7280"
                 st.markdown(
                     "<div style='padding:5px 0;border-bottom:1px solid #1e293b;font-size:0.82em'>"
                     "<div style='display:flex;gap:12px;align-items:center'>"
@@ -1156,17 +1212,6 @@ def show_detail(event_row, league_name):
                     unsafe_allow_html=True,
                 )
 
-    # ── Pairing flags ─────────────────────────────────────────────────────────
-    if not urgent_flags.empty:
-        with st.expander(f"⚠️ Line posted, Milestone missing ({len(urgent_flags)})", expanded=True):
-            for _, row in urgent_flags.iterrows():
-                st.markdown(
-                    "<div style='padding:4px 0;font-size:0.85em'>"
-                    "<span style='color:#f87171;font-weight:700'>" + row["PLAYERNAME"] + "</span>"
-                    "  —  <span style='color:#e5e7eb'>" + row["ISSUE"] + "</span></div>",
-                    unsafe_allow_html=True,
-                )
-
     if not fyi_flags.empty:
         with st.expander(f"ℹ️ Milestone posted, Line missing ({len(fyi_flags)})", expanded=False):
             for _, row in fyi_flags.iterrows():
@@ -1176,58 +1221,6 @@ def show_detail(event_row, league_name):
                     "  —  <span style='color:#9ca3af'>" + row["ISSUE"] + "</span></div>",
                     unsafe_allow_html=True,
                 )
-
-    # ── Competitor comparison (loads after main content) ─────────────────────
-    render_competitor_section(event_row["EVENTID"], league_name, player_info)
-
-    st.divider()
-
-    # ── Group tabs — Balanced + Milestones by default, Team/H2H hidden ────────
-    all_groups = [g for g in GROUP_ORDER if g in df["GROUP"].unique()]
-
-    # Tab labels: live/total + status badge
-    tab_labels = []
-    for g in all_groups:
-        grp_df   = df[df["GROUP"] == g]
-        n_live   = int((grp_df["STATUS"] == "LIVE").sum())
-        n_miss   = int((grp_df["STATUS"] == "MISSING").sum())
-        n_rem    = int((grp_df["STATUS"] == "REMOVED").sum())
-        n_total  = int(len(grp_df))
-        if n_miss:
-            badge = "  ❌"
-        elif n_rem:
-            badge = "  🟡"
-        else:
-            badge = "  ✅"
-        label = g + f"{badge} {n_live}/{n_total}"
-        tab_labels.append(label)
-
-    # Reorder so default groups come first
-    ordered_groups = [g for g in DETAIL_DEFAULT_GROUPS if g in all_groups] + \
-                     [g for g in all_groups if g not in DETAIL_DEFAULT_GROUPS]
-    ordered_labels = []
-    for g in ordered_groups:
-        idx = all_groups.index(g)
-        ordered_labels.append(tab_labels[idx])
-
-    tabs = st.tabs(ordered_labels)
-    for tab, grp in zip(tabs, ordered_groups):
-        with tab:
-            grp_df = df[df["GROUP"] == grp]
-            if grp_df.empty:
-                st.caption("No markets in this group.")
-                continue
-
-            st.markdown("##### Market Completion")
-            render_market_completion(grp_df, league_name)
-
-            st.markdown("<div style='height:20px'></div>", unsafe_allow_html=True)
-
-            # Players header + issues-only toggle on same line
-            p_col, t_col = st.columns([3, 2])
-            p_col.markdown("##### Players")
-            issues_only = t_col.toggle("Issues only", value=False, key=f"issues_{grp}")
-            render_player_cards(grp_df, player_info, league_name, issues_only)
 
 # ── Page: Overview ────────────────────────────────────────────────────────────
 
