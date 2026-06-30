@@ -293,6 +293,24 @@ def get_current_markets(event_id: str) -> pd.DataFrame:
         GROUP BY mp.PLAYERNAME, m.MARKETTYPENAME
     """)
 
+@st.cache_data(ttl=60, show_spinner=False)
+def get_current_lines(event_id: str) -> pd.DataFrame:
+    """Current Over line and price per player+market — used for MLB posting rules."""
+    return run_query(f"""
+        SELECT mp.PLAYERNAME, m.MARKETTYPENAME, s.POINTS AS LINE, s.LASTPROBABILITY
+        FROM SPORTSCONTENT.DBO.SELECTIONS s
+        JOIN SPORTSCONTENT.DBO.MARKETS m ON m.MARKETID = s.MARKETID AND m.EVENTID = '{event_id}'
+        JOIN SPORTSCONTENT.DBO.MARKETSPLAYERS_GLOBAL mp ON mp.MARKETID = s.MARKETID AND mp.EVENTID = '{event_id}'
+        WHERE s.EVENTID = '{event_id}'
+          AND s.ISREMOVED = FALSE AND m.ISREMOVED = FALSE
+          AND s.SELECTIONNAME = 'Over'
+          AND m.MARKETTYPENAME IN ('Stolen Bases O/U', 'Total Bases O/U')
+        QUALIFY ROW_NUMBER() OVER (
+            PARTITION BY mp.PLAYERNAME, m.MARKETTYPENAME
+            ORDER BY s.LASTMESSAGETIMESTAMP DESC
+        ) = 1
+    """)
+
 @st.cache_data(ttl=300, show_spinner=False)
 def get_player_info(event_id: str) -> pd.DataFrame:
     participants = run_query(f"""
@@ -593,10 +611,27 @@ def build_competitor_comparison(dk_prices: pd.DataFrame,
 # ── Build helpers ─────────────────────────────────────────────────────────────
 
 def build_status_df(baselines: pd.DataFrame, current: pd.DataFrame, league_name: str,
-                    player_info: pd.DataFrame = None) -> pd.DataFrame:
+                    player_info: pd.DataFrame = None, current_lines: pd.DataFrame = None) -> pd.DataFrame:
     is_mlb  = "mlb" in league_name.lower()
     is_wnba = "wnba" in league_name.lower()
     current_map = current.set_index(["PLAYERNAME", "MARKETTYPENAME"])["IS_LIVE"].to_dict() if not current.empty else {}
+
+    # MLB posting rules: pre-compute which player+market combos should NOT be flagged as missing
+    # SB O/U: don't flag if Over would be >+800 (player not a base-stealing threat)
+    # TB O/U: don't flag if line is 0.5 (same price as a Hit — we don't post 0.5 lines)
+    skip_missing = set()
+    if is_mlb and current_lines is not None and not current_lines.empty:
+        for _, r in current_lines.iterrows():
+            player, market = r["PLAYERNAME"], r["MARKETTYPENAME"]
+            prob = float(r["LASTPROBABILITY"]) if r["LASTPROBABILITY"] else 0
+            line = float(r["LINE"]) if r["LINE"] else 0
+            if market == "Stolen Bases O/U":
+                american = round(((1 - prob) / prob) * 100) if prob < 0.5 else round(-(prob / (1 - prob)) * 100)
+                if american > 800:
+                    skip_missing.add((player, market))
+            elif market == "Total Bases O/U":
+                if line <= 0.5:
+                    skip_missing.add((player, market))
     rows = []
 
     if not baselines.empty:
@@ -621,6 +656,8 @@ def build_status_df(baselines: pd.DataFrame, current: pd.DataFrame, league_name:
             key = (row["PLAYERNAME"], row["MARKETTYPENAME"])
             if key in current_map:
                 status = "LIVE" if current_map[key] == 1 else "REMOVED"
+            elif key in skip_missing:
+                continue  # don't show — MLB posting rule says we wouldn't post this
             else:
                 status = "MISSING"
             rows.append({
@@ -1132,14 +1169,15 @@ def show_detail(event_row, league_name):
     )
 
     try:
-        baselines   = get_player_baselines(event_row["EVENTID"])
-        current     = get_current_markets(event_row["EVENTID"])
-        player_info = get_player_info(event_row["EVENTID"])
+        baselines     = get_player_baselines(event_row["EVENTID"])
+        current       = get_current_markets(event_row["EVENTID"])
+        player_info   = get_player_info(event_row["EVENTID"])
+        current_lines = get_current_lines(event_row["EVENTID"]) if "mlb" in league_name.lower() else None
     except Exception as e:
         st.error(f"Query failed: {e}")
         return
 
-    df = build_status_df(baselines, current, league_name, player_info)
+    df = build_status_df(baselines, current, league_name, player_info, current_lines)
     if df.empty:
         st.warning("No player prop markets found for this event.")
         return
