@@ -693,28 +693,37 @@ def compute_group_pcts(baselines: pd.DataFrame, current: pd.DataFrame, league_na
         result[grp] = (int((grp_df["STATUS"] == "LIVE").sum()), int(len(grp_df)))
     return result
 
-# O/U ↔ Milestone pairing
+# O/U ↔ Milestone/XorFewer pairing
+# WNBA: O/U pairs with Milestones
+# MLB pitchers: O/U pairs with (X or Fewer) — the MLB equivalent of milestones
 OU_MILESTONE_PAIRS = {
-    "Points O/U": "Points Milestones",
-    "Rebounds O/U": "Rebounds Milestones",
-    "Assists O/U": "Assists Milestones",
-    "Three Pointers Made O/U": "Three Pointers Made Milestones",
-    "Points + Rebounds O/U": "Points + Rebounds Milestones",
-    "Points + Assists O/U": "Points + Assists Milestones",
-    "Rebounds + Assists O/U": "Rebounds + Assists Milestones",
-    "Points + Rebounds + Assists O/U": "Points + Rebounds + Assists Milestones",
-    "Hits O/U": "Hits Milestones",
-    "Strikeouts Thrown O/U": "Strikeouts Thrown Milestones",
-    "Earned Runs Allowed O/U": "Earned Runs Allowed Milestones",
-    "Hits Allowed O/U": "Hits Allowed Milestones",
-    "Total Bases O/U": "Total Bases Milestones",
-    "Hits + Runs + RBIs O/U": "Hits + Runs + RBIs Milestones",
-    "Runs + RBIs O/U": "Runs + RBIs Milestones",
-    "Stolen Bases O/U": "Stolen Bases Milestones",
-    "Singles O/U": "Singles Milestones",
-    "Triples O/U": "Triples Milestones",
-    "Walks Allowed O/U": "Walks Allowed Milestones",
-    "Strikeouts O/U": "Strikeouts Milestones",
+    # WNBA
+    "Points O/U":                       "Points Milestones",
+    "Rebounds O/U":                     "Rebounds Milestones",
+    "Assists O/U":                      "Assists Milestones",
+    "Three Pointers Made O/U":          "Three Pointers Made Milestones",
+    "Points + Rebounds O/U":            "Points + Rebounds Milestones",
+    "Points + Assists O/U":             "Points + Assists Milestones",
+    "Rebounds + Assists O/U":           "Rebounds + Assists Milestones",
+    "Points + Rebounds + Assists O/U":  "Points + Rebounds + Assists Milestones",
+    # MLB batters — O/U pairs with Milestones
+    "Hits O/U":                         "Hits Milestones",
+    "Total Bases O/U":                  "Total Bases Milestones",
+    "Hits + Runs + RBIs O/U":          "Hits + Runs + RBIs Milestones",
+    "Runs + RBIs O/U":                  "Runs + RBIs Milestones",
+    "Stolen Bases O/U":                 "Stolen Bases Milestones",
+    "Singles O/U":                      "Singles Milestones",
+    "Doubles O/U":                      "Doubles Milestones",
+    "Triples O/U":                      "Triples Milestones",
+    "Strikeouts O/U":                   "Strikeouts (Batter) Milestones",
+    "Walks (Batter) O/U":               "Walks (Batter) Milestones",
+    # MLB pitchers — O/U pairs with (X or Fewer)
+    "Strikeouts Thrown O/U":            "Strikeouts Thrown Milestones",
+    "Earned Runs Allowed O/U":          "Earned Runs Allowed (X or Fewer)",
+    "Hits Allowed O/U":                 "Hits Allowed (X or Fewer)",
+    "Walks Allowed O/U":                "Walks Allowed (X or Fewer)",
+    "Hits Allowed + Walks Allowed + Earned Runs Allowed O/U":
+                                        "Hits Allowed + Walks Allowed + Earned Runs Allowed (X or Fewer)",
 }
 
 def get_pairing_flags(df: pd.DataFrame) -> tuple:
@@ -724,6 +733,8 @@ def get_pairing_flags(df: pd.DataFrame) -> tuple:
     urgent, fyi = [], []
     for player in df["PLAYERNAME"].unique():
         for ou, mile in OU_MILESTONE_PAIRS.items():
+            if mile is None:
+                continue
             ou_s   = status_map.get((player, ou))
             mile_s = status_map.get((player, mile))
             if ou_s is None and mile_s is None:
