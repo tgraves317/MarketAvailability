@@ -354,7 +354,8 @@ def get_activity_feed(event_id: str, minutes: int = 30) -> pd.DataFrame:
             d.MARKETTYPENAME,
             CASE WHEN d.ISREMOVED = TRUE THEN 'REMOVED' ELSE 'PUBLISHED' END AS ACTION,
             d.CHANGED_AT,
-            COUNT(DISTINCT mp.PLAYERNAME) AS PLAYER_COUNT
+            COUNT(DISTINCT mp.PLAYERNAME) AS PLAYER_COUNT,
+            LISTAGG(DISTINCT mp.PLAYERNAME, ', ') WITHIN GROUP (ORDER BY mp.PLAYERNAME) AS PLAYERS
         FROM deduped d
         JOIN SPORTSCONTENT.DBO.MARKETSPLAYERS_GLOBAL mp
             ON mp.MARKETID = d.MARKETID AND mp.EVENTID = '{event_id}'
@@ -813,14 +814,17 @@ def show_detail(event_row, league_name):
         activity["CHANGED_AT_PT"] = pd.to_datetime(activity["CHANGED_AT"]).dt.tz_localize("UTC").dt.tz_convert(PT)
         with st.expander(f"📋 Recent activity — last 30 min ({len(activity)} changes)", expanded=False):
             for _, row in activity.iterrows():
-                color      = "#16a34a" if row["ACTION"] == "PUBLISHED" else "#dc2626"
-                ts         = row["CHANGED_AT_PT"].strftime("%I:%M %p")
-                player_str = f"  <span style='color:#6b7280'>({int(row['PLAYER_COUNT'])} players)</span>"
+                color    = "#16a34a" if row["ACTION"] == "PUBLISHED" else "#dc2626"
+                ts       = row["CHANGED_AT_PT"].strftime("%I:%M %p")
+                players  = str(row["PLAYERS"]) if row["PLAYERS"] else ""
                 st.markdown(
-                    "<div style='padding:3px 0;font-size:0.82em;display:flex;gap:12px;align-items:center'>"
+                    "<div style='padding:5px 0;border-bottom:1px solid #1e293b;font-size:0.82em'>"
+                    "<div style='display:flex;gap:12px;align-items:center'>"
                     "<span style='color:#6b7280;min-width:60px'>" + ts + "</span>"
-                    "<span style='color:" + color + ";font-weight:600;min-width:80px'>" + row["ACTION"] + "</span>"
-                    "<span style='color:#e5e7eb'>" + row["MARKETTYPENAME"] + player_str + "</span>"
+                    "<span style='color:" + color + ";font-weight:700;min-width:80px'>" + row["ACTION"] + "</span>"
+                    "<span style='color:#e5e7eb;font-weight:500'>" + row["MARKETTYPENAME"] + "</span>"
+                    "</div>"
+                    "<div style='color:#9ca3af;font-size:0.9em;margin-top:2px;padding-left:152px'>" + players + "</div>"
                     "</div>",
                     unsafe_allow_html=True,
                 )
