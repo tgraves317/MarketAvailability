@@ -978,7 +978,7 @@ def render_competitor_section(event_id: str, league_name: str, player_info: pd.D
     with ctrl_col:
         ctrl_a, ctrl_b = st.columns([2, 1])
         pct_threshold = ctrl_a.slider(
-            "Min % gap", min_value=1, max_value=15, value=5, step=1,
+            "Min % gap", min_value=1, max_value=15, value=3, step=1,
             label_visibility="collapsed", key=f"pct_thresh_{event_id}"
         )
         show_line_diffs = ctrl_b.toggle(
