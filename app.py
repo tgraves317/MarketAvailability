@@ -995,7 +995,7 @@ def render_competitor_section(event_id: str, league_name: str, player_info: pd.D
                + "  ·  ".join(parts) + "</span>" if parts else "") +
             "</div>"
             "<div style='font-size:0.68em;color:#4b5563;margin-top:2px'>"
-            "DK prices from Snowflake — may lag 1-2 min</div>",
+            "DK prices from Snowflake — pipeline lag can be significant; use for direction only</div>",
             unsafe_allow_html=True,
         )
     with ctrl_col:
