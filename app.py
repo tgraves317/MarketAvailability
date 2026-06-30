@@ -943,28 +943,48 @@ def render_competitor_section(event_id: str, league_name: str, player_info: pd.D
     except Exception:
         comparison = {"missing_on_dk": [], "missing_on_comp": [], "price_gaps": [], "line_diffs": [], "arbs": []}
 
-    n_missing_dk = len(comparison["missing_on_dk"])
-    n_price_gaps = len(comparison["price_gaps"])
-    n_line_diffs = len(comparison["line_diffs"])
-    n_arbs       = len(comparison["arbs"])
+    # Controls row: title left, slider + line diff toggle right
+    hdr_col, ctrl_col = st.columns([2, 3])
+    with hdr_col:
+        parts = []
+        if comparison["arbs"]:       parts.append(f"⚡ {len(comparison['arbs'])} arbs")
+        if comparison["missing_on_dk"]: parts.append(f"🚨 {len(comparison['missing_on_dk'])} missing")
+        if comparison["price_gaps"]: parts.append(f"{len(comparison['price_gaps'])} price gaps")
+        st.markdown(
+            f"<div style='font-weight:700;font-size:0.95em;padding-top:6px'>"
+            f"🔍 vs {bookmaker}"
+            + (f"  <span style='color:#9ca3af;font-weight:400;font-size:0.88em'>"
+               + "  ·  ".join(parts) + "</span>" if parts else "") +
+            "</div>"
+            "<div style='font-size:0.68em;color:#4b5563;margin-top:2px'>"
+            "DK prices from Snowflake — may lag 1-2 min</div>",
+            unsafe_allow_html=True,
+        )
+    with ctrl_col:
+        ctrl_a, ctrl_b = st.columns([2, 1])
+        pct_threshold = ctrl_a.slider(
+            "Min % gap", min_value=1, max_value=15, value=4, step=1,
+            label_visibility="collapsed", key=f"pct_thresh_{event_id}"
+        )
+        show_line_diffs = ctrl_b.toggle(
+            "Line diffs", value=False, key=f"show_lines_{event_id}"
+        )
 
-    if n_missing_dk == 0 and n_price_gaps == 0 and n_line_diffs == 0 and n_arbs == 0:
-        return
+    # Apply threshold filter to price gaps
+    filtered_gaps = [g for g in comparison["price_gaps"] if g["PROB_DIFF"] >= pct_threshold]
 
-    parts = []
-    if n_arbs:        parts.append(f"⚡ {n_arbs} arb{'s' if n_arbs > 1 else ''}")
-    if n_missing_dk:  parts.append(f"🚨 {n_missing_dk} we're missing")
-    if n_price_gaps:  parts.append(f"{n_price_gaps} price gaps")
-    if n_line_diffs:  parts.append(f"{n_line_diffs} line diffs")
-    expander_title = f"🔍 vs {bookmaker}  —  " + "  ·  ".join(parts)
+    if not comparison["arbs"] and not comparison["missing_on_dk"] and not filtered_gaps:
+        if not show_line_diffs or not comparison["line_diffs"]:
+            st.caption(f"No gaps vs {bookmaker} above {pct_threshold}%.")
+            return
 
     def row_html(player, market, detail, left_odds, right_label, right_odds, badge="", badge_color="#fbbf24"):
         mkt = market_short(market)
         badge_span = (f"<span style='color:{badge_color};font-weight:700;margin-left:6px'>{badge}</span>"
                       if badge else "")
         return (
-            "<div style='display:grid;grid-template-columns:160px 180px 1fr;gap:10px;"
-            "align-items:center;padding:5px 0;border-bottom:1px solid #1e293b;font-size:0.83em'>"
+            "<div style='display:grid;grid-template-columns:140px 160px 1fr;gap:8px;"
+            "align-items:center;padding:4px 0;border-bottom:1px solid #1e293b;font-size:0.82em'>"
             "<span style='color:#e5e7eb;font-weight:700'>" + player + "</span>"
             "<span style='color:#9ca3af'>" + mkt + "  " + detail + "</span>"
             "<span style='display:flex;gap:8px;align-items:center'>"
@@ -976,58 +996,52 @@ def render_competitor_section(event_id: str, league_name: str, player_info: pd.D
             "</div>"
         )
 
-    with st.expander(expander_title, expanded=True):
-        st.caption("DK prices from Snowflake — may lag 1-2 min. Arbs require ≥2% edge to filter data lag noise.")
+    # Two columns: left = missing + arbs, right = price gaps + line diffs
+    left_col, right_col = st.columns(2)
 
-        # ── Arbs ──────────────────────────────────────────────────────────────
+    with left_col:
         if comparison["arbs"]:
             st.markdown(
-                "<div style='font-size:0.72em;text-transform:uppercase;letter-spacing:0.08em;"
-                "color:#a78bfa;font-weight:700;margin-bottom:6px'>⚡ Arb opportunities</div>",
+                "<div style='font-size:0.68em;text-transform:uppercase;letter-spacing:0.08em;"
+                "color:#a78bfa;font-weight:700;margin:8px 0 4px'>⚡ Arbs</div>",
                 unsafe_allow_html=True,
             )
             for item in comparison["arbs"]:
                 line_str = f"@ {item['LINE']}" if item["LINE"] else ""
-                dk_str   = f"{item['DK_ODDS']:+d} {item['DK_SIDE']}"
-                comp_str = f"{item['COMP_ODDS']:+d} {item['COMP_SIDE']}"
                 st.markdown(
                     row_html(
                         item["PLAYERNAME"], item["MARKET"], line_str,
-                        dk_str, bookmaker, comp_str,
-                        badge=f"+{item['PROFIT_PCT']}% profit",
-                        badge_color="#a78bfa"
+                        f"{item['DK_ODDS']:+d} {item['DK_SIDE']}",
+                        bookmaker, f"{item['COMP_ODDS']:+d} {item['COMP_SIDE']}",
+                        badge=f"+{item['PROFIT_PCT']}%", badge_color="#a78bfa"
                     ),
                     unsafe_allow_html=True,
                 )
-            st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 
-        # ── Missing on DK ─────────────────────────────────────────────────────
         if comparison["missing_on_dk"]:
             st.markdown(
-                "<div style='font-size:0.72em;text-transform:uppercase;letter-spacing:0.08em;"
-                "color:#f87171;font-weight:700;margin-bottom:6px'>"
-                "🚨 " + bookmaker + " has, DK doesn't</div>",
+                "<div style='font-size:0.68em;text-transform:uppercase;letter-spacing:0.08em;"
+                "color:#f87171;font-weight:700;margin:8px 0 4px'>🚨 " + bookmaker + " has, DK doesn't</div>",
                 unsafe_allow_html=True,
             )
             for item in sorted(comparison["missing_on_dk"], key=lambda x: (x["MARKET"], x["PLAYERNAME"])):
                 st.markdown(
-                    "<div style='display:grid;grid-template-columns:160px 1fr;gap:10px;"
-                    "align-items:center;padding:5px 0;border-bottom:1px solid #1e293b;font-size:0.83em'>"
+                    "<div style='display:grid;grid-template-columns:140px 1fr;gap:8px;"
+                    "align-items:center;padding:4px 0;border-bottom:1px solid #1e293b;font-size:0.82em'>"
                     "<span style='color:#fca5a5;font-weight:700'>" + item["PLAYERNAME"] + "</span>"
                     "<span style='color:#f87171'>" + market_short(item["MARKET"]) + "</span>"
                     "</div>",
                     unsafe_allow_html=True,
                 )
-            st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 
-        # ── Price gaps ────────────────────────────────────────────────────────
-        if comparison["price_gaps"]:
+    with right_col:
+        if filtered_gaps:
             st.markdown(
-                "<div style='font-size:0.72em;text-transform:uppercase;letter-spacing:0.08em;"
-                "color:#fbbf24;font-weight:700;margin-bottom:6px'>Price gaps ≥4%</div>",
+                f"<div style='font-size:0.68em;text-transform:uppercase;letter-spacing:0.08em;"
+                f"color:#fbbf24;font-weight:700;margin:8px 0 4px'>Price gaps ≥{pct_threshold}%</div>",
                 unsafe_allow_html=True,
             )
-            for item in comparison["price_gaps"]:
+            for item in filtered_gaps:
                 line_str   = f"@ {item['LINE']}" if item["LINE"] else ""
                 diff_color = "#f87171" if item["PROB_DIFF"] >= 6 else "#fbbf24"
                 st.markdown(
@@ -1035,27 +1049,22 @@ def render_competitor_section(event_id: str, league_name: str, player_info: pd.D
                         item["PLAYERNAME"], item["MARKET"],
                         item["SIDE"] + " " + line_str,
                         f"{item['DK_ODDS']:+d}", bookmaker, f"{item['COMP_ODDS']:+d}",
-                        badge=f"({item['PROB_DIFF']}%)",
-                        badge_color=diff_color
+                        badge=f"({item['PROB_DIFF']}%)", badge_color=diff_color
                     ),
                     unsafe_allow_html=True,
                 )
-            st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 
-        # ── Line differences ──────────────────────────────────────────────────
-        if comparison["line_diffs"]:
+        if show_line_diffs and comparison["line_diffs"]:
             st.markdown(
-                "<div style='font-size:0.72em;text-transform:uppercase;letter-spacing:0.08em;"
-                "color:#6b7280;font-weight:700;margin-bottom:6px'>Different lines</div>",
+                "<div style='font-size:0.68em;text-transform:uppercase;letter-spacing:0.08em;"
+                "color:#6b7280;font-weight:700;margin:12px 0 4px'>Different lines</div>",
                 unsafe_allow_html=True,
             )
             for item in comparison["line_diffs"]:
-                dk_detail   = f"{item['DK_SIDE']} @ {item['DK_LINE']}" if "DK_SIDE" in item else f"@ {item['DK_LINE']}"
-                comp_detail = f"@ {item['COMP_LINE']}"
                 st.markdown(
-                    "<div style='display:grid;grid-template-columns:160px 180px 1fr;gap:10px;"
-                    "align-items:center;padding:4px 0;border-bottom:1px solid #1e293b;"
-                    "font-size:0.8em;color:#6b7280'>"
+                    "<div style='display:grid;grid-template-columns:140px 130px 1fr;gap:8px;"
+                    "align-items:center;padding:3px 0;border-bottom:1px solid #1e293b;"
+                    "font-size:0.78em;color:#6b7280'>"
                     "<span>" + item["PLAYERNAME"] + "</span>"
                     "<span>" + market_short(item["MARKET"]) + " " + item["SIDE"] + "</span>"
                     "<span>DK " + str(item["DK_LINE"]) + " " + f"{item['DK_ODDS']:+d}" +
