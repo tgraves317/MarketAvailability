@@ -13,42 +13,47 @@ LEAGUES = {
     "MLB":   {"league_id": "84240", "sport_id": "7"},
 }
 
-MLB_EXCLUDED_MARKETS = {
-    "Plate Appearance Pitch Count O/U",
-    "Plate Appearance Result Exact",
-    "Pitch Speed - Will the Next Pitch Be X MPH or Faster?",
-    "Either Pitcher Strikeouts Thrown",
-    "Either Batter Singles",
-    "Either Batter Triples",
-    "Combined Batter Total Bases",
-    "Combined Batter Hits",
-    "Combined Batter Stolen Bases",
-    "Combined Batter RBIs",
-    "Combined Batter Home Runs",
-    "Most Home Runs H2H",
-    "Win Probability",
-    "Starting Pitcher Race to 3 Strikeouts",
-    "1st Strikeout Thrown (H2H)",
-    "1st Earned Run Allowed (H2H)",
-    "Combined Pitcher Hits Allowed (X or Fewer)",
-    "Combined Pitcher Earned Runs Allowed (X or Fewer)",
-    "Combined Pitcher Strikeouts Thrown",
-    "Either Pitcher Hits Allowed (X or Fewer)",
-    "Either Pitcher Earned Runs Allowed (X or Fewer)",
-    "Walks Allowed (X or Fewer)",
-    "Hits Allowed + Walks Allowed + Earned Runs Allowed (X or Fewer)",
+# Allowlist approach for MLB — only these markets are shown, everything else excluded
+MLB_ALLOWED_MARKETS = {
+    # ── Pitcher ──────────────────────────────────────────────────────────────
     "Outs O/U",
-    "1st Batter to Double",
-    "1st Home Run (Batter)",
-    "1st RBI",
-    "1st Run (Batter)",
-    "Pitch Result (Listed Pitcher)",
-    "Plate Appearance Pitch Count Exact",
-    "Plate Appearance Result",
-    "Plate Appearance Result Grouped",
-    "1st Batter to Strike Out",
-    "1st Hit",
-    "1st Stolen Base",
+    "Strikeouts Thrown O/U",
+    "Strikeouts Thrown Milestones",
+    "Walks Allowed O/U",
+    "Walks Allowed (X or Fewer)",
+    "Hits Allowed O/U",
+    "Hits Allowed (X or Fewer)",
+    "Earned Runs Allowed O/U",
+    "Earned Runs Allowed (X or Fewer)",
+    "Hits Allowed + Walks Allowed + Earned Runs Allowed O/U",
+    "Hits Allowed + Walks Allowed + Earned Runs Allowed (X or Fewer)",
+    "Win Probability",
+    # ── Batter ───────────────────────────────────────────────────────────────
+    "Strikeouts (Batter) Milestones",
+    "Walks (Batter) O/U",
+    "Walks (Batter) Milestones",
+    "Home Runs Milestones",
+    "Hits O/U",
+    "Hits Milestones",
+    "Singles O/U",
+    "Singles Milestones",
+    "Doubles O/U",
+    "Doubles Milestones",
+    "Triples Milestones",
+    "Total Bases O/U",
+    "Total Bases Milestones",
+    "RBIs O/U",
+    "RBIs Milestones",
+    "Hits + Runs + RBIs O/U",
+    "Hits + Runs + RBIs Milestones",
+    "Stolen Bases O/U",
+    "Stolen Bases Milestones",
+    "Runs (Batter) Milestones",
+    "Runs + RBIs Milestones",
+    "Extra Base Hits Milestones",
+    "Hits + Stolen Bases Milestones",
+    "Hits + Walks + Stolen Bases Milestones",
+    "Hits + Runs + Stolen Bases Milestones",
 }
 
 WNBA_EXCLUDED_MARKETS = {
@@ -322,7 +327,7 @@ def build_status_df(baselines: pd.DataFrame, current: pd.DataFrame, league_name:
         bl["GROUP"] = bl["MARKETTYPENAME"].apply(classify_market)
         bl = bl[bl["GROUP"] != "Exclude"]
         if is_mlb:
-            bl = bl[~bl["MARKETTYPENAME"].isin(MLB_EXCLUDED_MARKETS)]
+            bl = bl[bl["MARKETTYPENAME"].isin(MLB_ALLOWED_MARKETS)]
         if is_wnba:
             bl = bl[~bl["MARKETTYPENAME"].isin(WNBA_EXCLUDED_MARKETS)]
         prop_players = bl[bl["GROUP"].isin(["Balanced", "Milestones"])]["PLAYERNAME"].unique()
@@ -356,7 +361,7 @@ def build_status_df(baselines: pd.DataFrame, current: pd.DataFrame, league_name:
             player_current = current[current["PLAYERNAME"] == player]
             for _, crow in player_current.iterrows():
                 grp = classify_market(crow["MARKETTYPENAME"])
-                if grp == "Exclude" or crow["MARKETTYPENAME"] in MLB_EXCLUDED_MARKETS:
+                if grp == "Exclude" or crow["MARKETTYPENAME"] not in MLB_ALLOWED_MARKETS:
                     continue
                 status = "LIVE" if crow["IS_LIVE"] == 1 else "REMOVED"
                 rows.append({"PLAYERNAME": player, "MARKET": crow["MARKETTYPENAME"],
