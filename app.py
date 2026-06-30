@@ -175,28 +175,38 @@ def run_query(sql: str) -> pd.DataFrame:
 
 @st.cache_data(ttl=60, show_spinner=False)
 def get_events(sport_id: str) -> pd.DataFrame:
-    return run_query(f"""
+    # Step 1: get fixture events from EVENTS view (fast — no join to big tables)
+    events = run_query(f"""
         SELECT DISTINCT e.EVENTID, e.EVENTNAME, e.LEAGUEID, e.LEAGUENAME, e.STARTEVENTDATE
         FROM SPORTSCONTENT.DBO.EVENTS e
         WHERE e.SPORTID = '{sport_id}'
+          AND e.EVENTTYPE = 'Fixture'
           AND e.STARTEVENTDATE >= CURRENT_TIMESTAMP
-          AND EXISTS (SELECT 1 FROM SPORTSCONTENT.DBO.MARKETSPLAYERS_GLOBAL mp WHERE mp.EVENTID = e.EVENTID)
+          AND e.STARTEVENTDATE <= CURRENT_TIMESTAMP + INTERVAL '14 days'
         ORDER BY e.STARTEVENTDATE
     """)
+    if events.empty:
+        return events
+    # Step 2: filter to only events that actually have player props (fast — small ID list)
+    ids_sql = ",".join(f"'{e}'" for e in events["EVENTID"].tolist())
+    with_players = run_query(f"""
+        SELECT DISTINCT EVENTID FROM SPORTSCONTENT.DBO.MARKETSPLAYERS_GLOBAL
+        WHERE EVENTID IN ({ids_sql})
+    """)
+    return events[events["EVENTID"].isin(with_players["EVENTID"])].reset_index(drop=True)
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def get_bulk_baselines(event_ids: tuple) -> pd.DataFrame:
     ids_sql = ",".join(f"'{e}'" for e in event_ids)
-    # Step 1: get all player+event pairs (fast)
-    ep_df = run_query(f"""
-        SELECT DISTINCT PLAYERNAME, EVENTID AS TARGET_EVENT
-        FROM SPORTSCONTENT.DBO.MARKETSPLAYERS_GLOBAL
+    # Step 1: get all unique players across all events in ONE query
+    players_df = run_query(f"""
+        SELECT DISTINCT PLAYERNAME FROM SPORTSCONTENT.DBO.MARKETSPLAYERS_GLOBAL
         WHERE EVENTID IN ({ids_sql})
     """)
-    if ep_df.empty:
+    if players_df.empty:
         return pd.DataFrame()
     players_sql = ",".join(
-        f"'{p.replace(chr(39), chr(39)*2)}'" for p in ep_df["PLAYERNAME"].unique().tolist()
+        f"'{p.replace(chr(39), chr(39)*2)}'" for p in players_df["PLAYERNAME"].unique().tolist()
     )
     # Step 2: use EVENTSPLAYERS_GLOBAL for the history lookup (fast)
     return run_query(f"""
@@ -972,7 +982,7 @@ def render_competitor_section(event_id: str, league_name: str, player_info: pd.D
     with ctrl_col:
         ctrl_a, ctrl_b = st.columns([2, 1])
         pct_threshold = ctrl_a.slider(
-            "Min % gap", min_value=1, max_value=15, value=4, step=1,
+            "Min % gap", min_value=1, max_value=15, value=5, step=1,
             label_visibility="collapsed", key=f"pct_thresh_{event_id}"
         )
         show_line_diffs = ctrl_b.toggle(
@@ -1005,25 +1015,34 @@ def render_competitor_section(event_id: str, league_name: str, player_info: pd.D
             "</div>"
         )
 
-    # ── Arbs — full width ────────────────────────────────────────────────────
+    # ── Arbs — full-width banner matching missing markets ────────────────────
     if comparison["arbs"]:
+        arb_pills = ""
+        for item in comparison["arbs"]:
+            line_str = f" @ {item['LINE']}" if item["LINE"] else ""
+            arb_pills += (
+                "<span style='display:inline-flex;align-items:center;justify-content:center;gap:6px;"
+                "background:#1a0a2e;border:1px solid #7c3aed;border-radius:6px;"
+                "padding:6px 14px;margin:4px;white-space:nowrap'>"
+                "<span style='color:#c4b5fd;font-weight:800;font-size:1em'>" + item["PLAYERNAME"] + "</span>"
+                "<span style='color:#6b7280'>—</span>"
+                "<span style='color:#a78bfa;font-weight:700'>" + market_short(item["MARKET"]) + line_str + "</span>"
+                "<span style='color:#4b5563'>|</span>"
+                "<span style='color:#16a34a;font-weight:700'>DK " + f"{item['DK_ODDS']:+d}" + " " + item["DK_SIDE"] + "</span>"
+                "<span style='color:#4b5563'>vs</span>"
+                "<span style='color:#a78bfa;font-weight:700'>" + bookmaker + " " + f"{item['COMP_ODDS']:+d}" + " " + item["COMP_SIDE"] + "</span>"
+                "<span style='color:#a78bfa;font-weight:800;background:#2e1065;padding:2px 6px;border-radius:4px;margin-left:4px'>+" + str(item["PROFIT_PCT"]) + "%</span>"
+                "</span>"
+            )
         st.markdown(
-            "<div style='font-size:0.68em;text-transform:uppercase;letter-spacing:0.08em;"
-            "color:#a78bfa;font-weight:700;margin:8px 0 4px'>⚡ Arbs</div>",
+            "<div style='background:#0d0619;border:2px solid #7c3aed;border-radius:10px;"
+            "padding:14px 18px;margin:8px 0;width:100%'>"
+            "<div style='font-size:1em;font-weight:800;color:#a78bfa;letter-spacing:0.04em;"
+            "text-transform:uppercase;margin-bottom:10px;text-align:center'>⚡ Arb opportunities</div>"
+            "<div style='display:flex;flex-wrap:wrap;justify-content:center'>" + arb_pills + "</div>"
+            "</div>",
             unsafe_allow_html=True,
         )
-        arb_cols = st.columns(2)
-        for i, item in enumerate(comparison["arbs"]):
-            line_str = f"@ {item['LINE']}" if item["LINE"] else ""
-            arb_cols[i % 2].markdown(
-                row_html(
-                    item["PLAYERNAME"], item["MARKET"], line_str,
-                    f"{item['DK_ODDS']:+d} {item['DK_SIDE']}",
-                    bookmaker, f"{item['COMP_ODDS']:+d} {item['COMP_SIDE']}",
-                    badge=f"+{item['PROFIT_PCT']}%", badge_color="#a78bfa"
-                ),
-                unsafe_allow_html=True,
-            )
 
     # ── Missing — full-width alarm banner ────────────────────────────────────
     if comparison["missing_on_dk"]:
