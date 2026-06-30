@@ -178,32 +178,44 @@ def get_events(sport_id: str) -> pd.DataFrame:
 @st.cache_data(ttl=1800, show_spinner=False)
 def get_bulk_baselines(event_ids: tuple) -> pd.DataFrame:
     ids_sql = ",".join(f"'{e}'" for e in event_ids)
+    # Step 1: get all player+event pairs (fast)
+    ep_df = run_query(f"""
+        SELECT DISTINCT PLAYERNAME, EVENTID AS TARGET_EVENT
+        FROM SPORTSCONTENT.DBO.MARKETSPLAYERS_GLOBAL
+        WHERE EVENTID IN ({ids_sql})
+    """)
+    if ep_df.empty:
+        return pd.DataFrame()
+    players_sql = ",".join(
+        f"'{p.replace(chr(39), chr(39)*2)}'" for p in ep_df["PLAYERNAME"].unique().tolist()
+    )
+    # Step 2: use EVENTSPLAYERS_GLOBAL for the history lookup (fast)
     return run_query(f"""
-        WITH event_players AS (
+        WITH target_players AS (
             SELECT DISTINCT PLAYERNAME, EVENTID AS TARGET_EVENT
             FROM SPORTSCONTENT.DBO.MARKETSPLAYERS_GLOBAL
             WHERE EVENTID IN ({ids_sql})
         ),
-        recent_player_events AS (
-            SELECT ep.PLAYERNAME, ep.TARGET_EVENT, mp.EVENTID, e.STARTEVENTDATE
-            FROM event_players ep
-            JOIN SPORTSCONTENT.DBO.MARKETSPLAYERS_GLOBAL mp ON mp.PLAYERNAME = ep.PLAYERNAME
-            JOIN SPORTSCONTENT.DBO.EVENTS e ON e.EVENTID = mp.EVENTID
-            WHERE e.STARTEVENTDATE >= CURRENT_TIMESTAMP - INTERVAL '60 days'
+        player_recent_events AS (
+            SELECT ep.PLAYERSNAME AS PLAYERNAME, ep.EVENTID, e.STARTEVENTDATE,
+                   ROW_NUMBER() OVER (PARTITION BY ep.PLAYERSNAME ORDER BY e.STARTEVENTDATE DESC) AS rn
+            FROM SPORTSCONTENT.DBO.EVENTSPLAYERS_GLOBAL ep
+            JOIN SPORTSCONTENT.DBO.EVENTS e ON e.EVENTID = ep.EVENTID
+            WHERE ep.PLAYERSNAME IN ({players_sql})
+              AND e.STARTEVENTDATE >= CURRENT_TIMESTAMP - INTERVAL '60 days'
               AND e.STARTEVENTDATE < CURRENT_TIMESTAMP
-              AND mp.EVENTID NOT IN ({ids_sql})
-            QUALIFY DENSE_RANK() OVER (
-                PARTITION BY ep.PLAYERNAME, ep.TARGET_EVENT
-                ORDER BY e.STARTEVENTDATE DESC
-            ) = 1
+              AND ep.EVENTID NOT IN ({ids_sql})
+        ),
+        last_game AS (
+            SELECT PLAYERNAME, EVENTID, STARTEVENTDATE FROM player_recent_events WHERE rn = 1
         )
-        SELECT DISTINCT rpe.TARGET_EVENT AS EVENTID, rpe.PLAYERNAME,
-                        m.MARKETTYPENAME, rpe.STARTEVENTDATE AS LAST_GAME_DATE
-        FROM recent_player_events rpe
-        JOIN SPORTSCONTENT.DBO.MARKETSPLAYERS_GLOBAL mp2
-            ON mp2.PLAYERNAME = rpe.PLAYERNAME AND mp2.EVENTID = rpe.EVENTID
-        JOIN SPORTSCONTENT.DBO.MARKETS m
-            ON m.MARKETID = mp2.MARKETID AND m.EVENTID = rpe.EVENTID
+        SELECT DISTINCT tp.TARGET_EVENT AS EVENTID, lg.PLAYERNAME,
+                        m.MARKETTYPENAME, lg.STARTEVENTDATE AS LAST_GAME_DATE
+        FROM target_players tp
+        JOIN last_game lg ON lg.PLAYERNAME = tp.PLAYERNAME
+        JOIN SPORTSCONTENT.DBO.MARKETSPLAYERS_GLOBAL mp
+            ON mp.PLAYERNAME = lg.PLAYERNAME AND mp.EVENTID = lg.EVENTID
+        JOIN SPORTSCONTENT.DBO.MARKETS m ON m.MARKETID = mp.MARKETID AND m.EVENTID = lg.EVENTID
     """)
 
 @st.cache_data(ttl=30, show_spinner=False)
@@ -220,32 +232,35 @@ def get_bulk_current_markets(event_ids: tuple) -> pd.DataFrame:
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def get_player_baselines(event_id: str) -> pd.DataFrame:
+    # Step 1: get player list (fast — single event filter)
+    players_df = run_query(f"""
+        SELECT DISTINCT PLAYERNAME FROM SPORTSCONTENT.DBO.MARKETSPLAYERS_GLOBAL
+        WHERE EVENTID = '{event_id}'
+    """)
+    if players_df.empty:
+        return pd.DataFrame()
+    players_sql = ",".join(
+        f"'{p.replace(chr(39), chr(39)*2)}'" for p in players_df["PLAYERNAME"].tolist()
+    )
+    # Step 2: find last game per player + fetch markets (fast — EVENTSPLAYERS_GLOBAL is small)
     return run_query(f"""
-        WITH event_players AS (
-            SELECT DISTINCT PLAYERNAME
-            FROM SPORTSCONTENT.DBO.MARKETSPLAYERS_GLOBAL
-            WHERE EVENTID = '{event_id}'
-        ),
-        recent_player_events AS (
-            SELECT ep.PLAYERNAME, mp.EVENTID, e.STARTEVENTDATE
-            FROM event_players ep
-            JOIN SPORTSCONTENT.DBO.MARKETSPLAYERS_GLOBAL mp ON mp.PLAYERNAME = ep.PLAYERNAME
-            JOIN SPORTSCONTENT.DBO.EVENTS e ON e.EVENTID = mp.EVENTID
-            WHERE e.STARTEVENTDATE >= CURRENT_TIMESTAMP - INTERVAL '60 days'
+        WITH player_recent_events AS (
+            SELECT ep.PLAYERSNAME AS PLAYERNAME, ep.EVENTID, e.STARTEVENTDATE,
+                   ROW_NUMBER() OVER (PARTITION BY ep.PLAYERSNAME ORDER BY e.STARTEVENTDATE DESC) AS rn
+            FROM SPORTSCONTENT.DBO.EVENTSPLAYERS_GLOBAL ep
+            JOIN SPORTSCONTENT.DBO.EVENTS e ON e.EVENTID = ep.EVENTID
+            WHERE ep.PLAYERSNAME IN ({players_sql})
+              AND e.STARTEVENTDATE >= CURRENT_TIMESTAMP - INTERVAL '60 days'
               AND e.STARTEVENTDATE < CURRENT_TIMESTAMP
-              AND mp.EVENTID != '{event_id}'
-            QUALIFY DENSE_RANK() OVER (PARTITION BY ep.PLAYERNAME ORDER BY e.STARTEVENTDATE DESC) = 1
-        ),
-        last_game_markets AS (
-            SELECT DISTINCT rpe.PLAYERNAME, m.MARKETTYPENAME, rpe.STARTEVENTDATE AS LAST_GAME_DATE
-            FROM recent_player_events rpe
-            JOIN SPORTSCONTENT.DBO.MARKETSPLAYERS_GLOBAL mp2
-                ON mp2.PLAYERNAME = rpe.PLAYERNAME AND mp2.EVENTID = rpe.EVENTID
-            JOIN SPORTSCONTENT.DBO.MARKETS m ON m.MARKETID = mp2.MARKETID AND m.EVENTID = rpe.EVENTID
+              AND ep.EVENTID != '{event_id}'
         )
-        SELECT PLAYERNAME, MARKETTYPENAME, LAST_GAME_DATE
-        FROM last_game_markets
-        ORDER BY PLAYERNAME, MARKETTYPENAME
+        SELECT DISTINCT pre.PLAYERNAME, m.MARKETTYPENAME, pre.STARTEVENTDATE AS LAST_GAME_DATE
+        FROM player_recent_events pre
+        JOIN SPORTSCONTENT.DBO.MARKETSPLAYERS_GLOBAL mp
+            ON mp.PLAYERNAME = pre.PLAYERNAME AND mp.EVENTID = pre.EVENTID
+        JOIN SPORTSCONTENT.DBO.MARKETS m ON m.MARKETID = mp.MARKETID AND m.EVENTID = pre.EVENTID
+        WHERE pre.rn = 1
+        ORDER BY pre.PLAYERNAME, m.MARKETTYPENAME
     """)
 
 @st.cache_data(ttl=30, show_spinner=False)
@@ -349,7 +364,8 @@ MLB_MARKET_MAP = {
     "pitcher_earned_runs":  "Earned Runs Allowed O/U",
 }
 
-PRICE_DIFF_THRESHOLD = 20  # American odds points
+PRICE_DIFF_THRESHOLD = 0.04  # implied probability difference (4 percentage points)
+LINE_DIFF_THRESHOLD  = 0.5   # line difference in points
 
 def prob_to_american(p: float) -> int:
     p = max(min(p, 0.9999), 0.0001)
@@ -466,7 +482,7 @@ def build_competitor_comparison(dk_prices: pd.DataFrame,
       - missing_on_comp: markets DK has but competitor doesn't
       - price_gaps:     same market/player/line but odds differ >= threshold
     """
-    result = {"missing_on_dk": [], "missing_on_comp": [], "price_gaps": []}
+    result = {"missing_on_dk": [], "missing_on_comp": [], "price_gaps": [], "line_diffs": []}
     if comp_prices.empty:
         return result
 
@@ -498,7 +514,8 @@ def build_competitor_comparison(dk_prices: pd.DataFrame,
     for player, market in sorted(dk_mapped_set - comp_set):
         result["missing_on_comp"].append({"PLAYERNAME": player, "MARKET": market, "SOURCE": bookmaker})
 
-    # Price gaps
+    # Price gaps — same line, different price (implied prob diff ≥ threshold)
+    # Line differences are shown separately to avoid cluttering price gaps
     for _, crow in comp_prices.iterrows():
         key = (crow["PLAYERNAME"], crow["DK_MARKET"], crow["SIDE"])
         if key not in dk_lookup:
@@ -507,14 +524,27 @@ def build_competitor_comparison(dk_prices: pd.DataFrame,
         comp_american = crow["AMERICAN_ODDS"]
         comp_line     = crow["LINE"]
 
-        # Flag if line differs
         line_diff = abs(float(dk_line or 0) - float(comp_line or 0)) if dk_line and comp_line else 0
 
-        # Flag if price differs by threshold
-        price_diff = abs(dk_american - comp_american)
+        # Use implied probability difference — scales correctly for long shots
+        dk_prob   = american_to_prob(dk_american)
+        comp_prob = american_to_prob(comp_american)
+        prob_diff = abs(dk_prob - comp_prob)
 
-        if price_diff >= PRICE_DIFF_THRESHOLD or line_diff >= 0.5:
+        # Only flag same-line price differences; skip if lines diverge
+        if line_diff < LINE_DIFF_THRESHOLD and prob_diff >= PRICE_DIFF_THRESHOLD:
             result["price_gaps"].append({
+                "PLAYERNAME":   crow["PLAYERNAME"],
+                "MARKET":       crow["DK_MARKET"],
+                "SIDE":         crow["SIDE"],
+                "LINE":         dk_line,
+                "DK_ODDS":      dk_american,
+                "COMP_ODDS":    comp_american,
+                "PROB_DIFF":    round(prob_diff * 100, 1),  # as percentage points
+                "SOURCE":       bookmaker,
+            })
+        elif line_diff >= LINE_DIFF_THRESHOLD:
+            result["line_diffs"].append({
                 "PLAYERNAME":   crow["PLAYERNAME"],
                 "MARKET":       crow["DK_MARKET"],
                 "SIDE":         crow["SIDE"],
@@ -523,12 +553,12 @@ def build_competitor_comparison(dk_prices: pd.DataFrame,
                 "COMP_LINE":    comp_line,
                 "COMP_ODDS":    comp_american,
                 "LINE_DIFF":    line_diff,
-                "PRICE_DIFF":   price_diff,
                 "SOURCE":       bookmaker,
             })
 
-    # Sort price gaps by biggest difference first
-    result["price_gaps"].sort(key=lambda x: -x["PRICE_DIFF"])
+    # Sort price gaps by implied prob difference
+    result["price_gaps"].sort(key=lambda x: -x["PROB_DIFF"])
+    result["line_diffs"].sort(key=lambda x: (-x["LINE_DIFF"], x["PLAYERNAME"]))
     return result
 
 # ── Build helpers ─────────────────────────────────────────────────────────────
@@ -876,57 +906,94 @@ def render_competitor_section(event_id: str, league_name: str, player_info: pd.D
         comp_prices = get_competitor_prices(event_id, league_name, home_team, away_team)
         comparison  = build_competitor_comparison(dk_prices, comp_prices, league_name)
     except Exception:
-        comparison = {"missing_on_dk": [], "missing_on_comp": [], "price_gaps": []}
+        comparison = {"missing_on_dk": [], "missing_on_comp": [], "price_gaps": [], "line_diffs": []}
 
     n_missing_dk = len(comparison["missing_on_dk"])
     n_price_gaps = len(comparison["price_gaps"])
+    n_line_diffs = len(comparison["line_diffs"])
 
-    if n_missing_dk == 0 and n_price_gaps == 0:
+    if n_missing_dk == 0 and n_price_gaps == 0 and n_line_diffs == 0:
         return
 
-    with st.expander(
-        f"🔍 vs {bookmaker}  —  "
-        f"{n_missing_dk} markets they have we don't  ·  "
-        f"{n_price_gaps} price gaps ≥20¢",
-        expanded=True
-    ):
+    expander_title = f"🔍 vs {bookmaker}"
+    if n_missing_dk:
+        expander_title += f"  —  🚨 {n_missing_dk} they have, we don't"
+    if n_price_gaps:
+        expander_title += f"  ·  {n_price_gaps} price gaps"
+    if n_line_diffs:
+        expander_title += f"  ·  {n_line_diffs} line diffs"
+
+    with st.expander(expander_title, expanded=True):
+
+        # ── Missing on DK — most important, visually prominent ────────────────
         if comparison["missing_on_dk"]:
+            # Group by market for cleaner reading
+            by_market = {}
+            for item in comparison["missing_on_dk"]:
+                by_market.setdefault(item["MARKET"], []).append(item["PLAYERNAME"])
+
             st.markdown(
+                "<div style='background:#2d0a0a;border:1px solid #dc2626;border-radius:8px;"
+                "padding:12px 16px;margin-bottom:12px'>"
                 "<div style='font-size:0.72em;text-transform:uppercase;letter-spacing:0.08em;"
-                "color:#f87171;font-weight:700;margin-bottom:6px'>"
-                + bookmaker + " has, DK doesn't</div>",
+                "color:#f87171;font-weight:700;margin-bottom:10px'>"
+                "🚨 " + bookmaker + " has these, DK doesn't</div>",
                 unsafe_allow_html=True,
             )
-            for item in comparison["missing_on_dk"]:
+            for market, players in sorted(by_market.items()):
+                names = ", ".join(players)
                 st.markdown(
-                    "<div style='padding:3px 0;font-size:0.85em'>"
-                    "<span style='color:#f87171;font-weight:600'>" + item["PLAYERNAME"] + "</span>"
-                    "  —  <span style='color:#e5e7eb'>" + item["MARKET"] + "</span>"
+                    "<div style='padding:4px 0;font-size:0.88em'>"
+                    "<span style='color:#fca5a5;font-weight:700'>" + market + "</span>"
+                    "  <span style='color:#9ca3af;font-size:0.9em'>→ " + names + "</span>"
+                    "</div>",
+                    unsafe_allow_html=True,
+                )
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        # ── Price gaps — implied prob difference ≥4% ─────────────────────────
+        if comparison["price_gaps"]:
+            st.markdown(
+                "<div style='font-size:0.72em;text-transform:uppercase;letter-spacing:0.08em;"
+                "color:#fbbf24;font-weight:700;margin:8px 0 6px'>Price gaps ≥4%</div>",
+                unsafe_allow_html=True,
+            )
+            for item in comparison["price_gaps"]:
+                dk_str    = f"{item['DK_ODDS']:+d}"
+                comp_str  = f"{item['COMP_ODDS']:+d}"
+                line_str  = f" @ {item['LINE']}" if item["LINE"] else ""
+                diff_color = "#f87171" if item["PROB_DIFF"] >= 6 else "#fbbf24"
+                mkt_short_str = market_short(item["MARKET"])
+                st.markdown(
+                    "<div style='padding:3px 0;font-size:0.83em;display:flex;gap:10px;align-items:center'>"
+                    "<span style='color:#e5e7eb;min-width:150px;font-weight:600'>" + item["PLAYERNAME"] + "</span>"
+                    "<span style='color:#9ca3af;min-width:180px'>" + mkt_short_str + " " + item["SIDE"] + line_str + "</span>"
+                    "<span style='color:#16a34a'>DK " + dk_str + "</span>"
+                    "<span style='color:#4b5563'>vs</span>"
+                    "<span style='color:" + diff_color + "'>" + bookmaker + " " + comp_str + "</span>"
+                    "<span style='color:" + diff_color + ";font-weight:700;font-size:0.85em'>(" + str(item["PROB_DIFF"]) + "%)</span>"
                     "</div>",
                     unsafe_allow_html=True,
                 )
 
-        if comparison["price_gaps"]:
+        # ── Line differences ──────────────────────────────────────────────────
+        if comparison["line_diffs"]:
             st.markdown(
                 "<div style='font-size:0.72em;text-transform:uppercase;letter-spacing:0.08em;"
-                "color:#fbbf24;font-weight:700;margin:12px 0 6px'>"
-                "Price gaps ≥20¢</div>",
+                "color:#6b7280;font-weight:700;margin:12px 0 6px'>Different lines</div>",
                 unsafe_allow_html=True,
             )
-            for item in comparison["price_gaps"]:
+            for item in comparison["line_diffs"]:
                 dk_str   = f"{item['DK_ODDS']:+d}"
                 comp_str = f"{item['COMP_ODDS']:+d}"
-                line_str = (f" @ {item['DK_LINE']} vs {item['COMP_LINE']}"
-                            if item["LINE_DIFF"] >= 0.5 else f" @ {item['DK_LINE']}")
-                diff_color = "#f87171" if item["PRICE_DIFF"] >= 30 else "#fbbf24"
+                mkt_short_str = market_short(item["MARKET"])
                 st.markdown(
-                    "<div style='padding:3px 0;font-size:0.85em;display:flex;gap:12px'>"
-                    "<span style='color:#e5e7eb;min-width:160px;font-weight:600'>" + item["PLAYERNAME"] + "</span>"
-                    "<span style='color:#9ca3af;min-width:200px'>" + item["MARKET"] + " " + item["SIDE"] + line_str + "</span>"
-                    "<span style='color:#16a34a'>DK " + dk_str + "</span>"
-                    "<span style='color:#6b7280'>vs</span>"
-                    "<span style='color:" + diff_color + "'>" + bookmaker + " " + comp_str + "</span>"
-                    "<span style='color:" + diff_color + ";font-weight:700'>(" + str(item["PRICE_DIFF"]) + "¢)</span>"
+                    "<div style='padding:2px 0;font-size:0.8em;display:flex;gap:10px;align-items:center;color:#6b7280'>"
+                    "<span style='min-width:150px'>" + item["PLAYERNAME"] + "</span>"
+                    "<span style='min-width:160px'>" + mkt_short_str + " " + item["SIDE"] + "</span>"
+                    "<span>DK " + str(item["DK_LINE"]) + " " + dk_str + "</span>"
+                    "<span>vs</span>"
+                    "<span>" + bookmaker + " " + str(item["COMP_LINE"]) + " " + comp_str + "</span>"
                     "</div>",
                     unsafe_allow_html=True,
                 )
