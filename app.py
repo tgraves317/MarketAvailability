@@ -1036,7 +1036,7 @@ def render_competitor_section(event_id: str, league_name: str, player_info: pd.D
             "<div style='font-size:1em;font-weight:800;color:#f87171;letter-spacing:0.04em;"
             "text-transform:uppercase;margin-bottom:10px'>"
             "🚨 " + bookmaker + " has these — DK doesn't</div>"
-            "<div style='display:flex;flex-wrap:wrap'>" + pills + "</div>"
+            "<div style='display:flex;flex-wrap:wrap;justify-content:center'>" + pills + "</div>"
             "</div>",
             unsafe_allow_html=True,
         )
@@ -1185,11 +1185,20 @@ def show_detail(event_row, league_name):
                 continue
 
             # Toggle between Market Completion and Players views — centered
+            st.markdown(
+                "<style>div[data-testid='stHorizontalBlock']:has(div[data-testid='stRadio']) "
+                "{ justify-content: center; }</style>",
+                unsafe_allow_html=True,
+            )
             _, center_col, _ = st.columns([2, 3, 2])
             view_choice = center_col.radio(
                 "View", ["Market Completion", "Players"],
                 horizontal=True, label_visibility="collapsed",
                 key=f"view_{grp}"
+            )
+            st.markdown(
+                "<style>div[data-testid='stRadio'] > div { justify-content: center; }</style>",
+                unsafe_allow_html=True,
             )
 
             if view_choice == "Market Completion":
