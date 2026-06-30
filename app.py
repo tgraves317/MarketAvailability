@@ -38,6 +38,17 @@ MLB_EXCLUDED_MARKETS = {
     "Walks Allowed (X or Fewer)",
     "Hits Allowed + Walks Allowed + Earned Runs Allowed (X or Fewer)",
     "Outs O/U",
+    "1st Batter to Double",
+    "1st Home Run (Batter)",
+    "1st RBI",
+    "1st Run (Batter)",
+    "Pitch Result (Listed Pitcher)",
+    "Plate Appearance Pitch Count Exact",
+    "Plate Appearance Result",
+    "Plate Appearance Result Grouped",
+    "1st Batter to Strike Out",
+    "1st Hit",
+    "1st Stolen Base",
 }
 
 WNBA_EXCLUDED_MARKETS = {
@@ -68,9 +79,6 @@ def classify_market(name: str) -> str:
         or "first field goal scorer" in n
         or "first field goal made type" in n
         or "player first field goal made type" in n
-        or "1st hit" in n
-        or "1st batter to strike out" in n
-        or "1st stolen base" in n
     ):
         return "Balanced"
     return "Other"
