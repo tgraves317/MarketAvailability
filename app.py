@@ -508,7 +508,10 @@ def build_competitor_comparison(dk_prices: pd.DataFrame,
         result["missing_on_comp"].append({"PLAYERNAME": player, "MARKET": market, "SOURCE": bookmaker})
 
     # Price gaps — same line, different price (implied prob diff ≥ threshold)
-    # Line differences are shown separately to avoid cluttering price gaps
+    # Collect all gaps (both same-line and different-line)
+    # Track best gap per player+market to avoid showing both Over and Under
+    best_gap = {}  # (player, market) → gap dict with highest PROB_DIFF
+
     for _, crow in comp_prices.iterrows():
         key = (crow["PLAYERNAME"], crow["DK_MARKET"], crow["SIDE"])
         if key not in dk_lookup:
@@ -518,38 +521,41 @@ def build_competitor_comparison(dk_prices: pd.DataFrame,
         comp_line     = crow["LINE"]
 
         line_diff = abs(float(dk_line or 0) - float(comp_line or 0)) if dk_line and comp_line else 0
-
-        # Use implied probability difference — scales correctly for long shots
         dk_prob   = american_to_prob(dk_american)
         comp_prob = american_to_prob(comp_american)
         prob_diff = abs(dk_prob - comp_prob)
 
-        # Only flag same-line price differences; skip if lines diverge
-        if line_diff < LINE_DIFF_THRESHOLD and prob_diff >= PRICE_DIFF_THRESHOLD:
-            result["price_gaps"].append({
-                "PLAYERNAME":   crow["PLAYERNAME"],
-                "MARKET":       crow["DK_MARKET"],
-                "SIDE":         crow["SIDE"],
-                "LINE":         dk_line,
-                "DK_ODDS":      dk_american,
-                "COMP_ODDS":    comp_american,
-                "PROB_DIFF":    round(prob_diff * 100, 1),  # as percentage points
-                "SOURCE":       bookmaker,
-            })
-        elif line_diff >= LINE_DIFF_THRESHOLD:
-            result["line_diffs"].append({
-                "PLAYERNAME":   crow["PLAYERNAME"],
-                "MARKET":       crow["DK_MARKET"],
-                "SIDE":         crow["SIDE"],
-                "DK_LINE":      dk_line,
-                "DK_ODDS":      dk_american,
-                "COMP_LINE":    comp_line,
-                "COMP_ODDS":    comp_american,
-                "LINE_DIFF":    line_diff,
-                "SOURCE":       bookmaker,
-            })
+        gap = {
+            "PLAYERNAME":  crow["PLAYERNAME"],
+            "MARKET":      crow["DK_MARKET"],
+            "SIDE":        crow["SIDE"],
+            "DK_LINE":     dk_line,
+            "DK_ODDS":     dk_american,
+            "COMP_LINE":   comp_line,
+            "COMP_ODDS":   comp_american,
+            "PROB_DIFF":   round(prob_diff * 100, 1),
+            "LINE_DIFF":   round(line_diff, 1),
+            "SOURCE":      bookmaker,
+        }
 
-    # Sort price gaps by implied prob difference
+        pm_key = (crow["PLAYERNAME"], crow["DK_MARKET"])
+        # Keep only the side with the larger gap per player+market
+        if pm_key not in best_gap or prob_diff > best_gap[pm_key]["_raw_prob_diff"]:
+            gap["_raw_prob_diff"] = prob_diff
+            best_gap[pm_key] = gap
+
+        # Route to line_diffs if lines differ significantly
+        if line_diff >= LINE_DIFF_THRESHOLD:
+            result["line_diffs"].append(gap)
+
+    # Price gaps = same-line gaps above threshold, one row per player+market
+    pct_threshold_val = PRICE_DIFF_THRESHOLD * 100  # convert 0.04 → 4.0
+    for gap in best_gap.values():
+        # Clean up internal key before storing
+        gap.pop("_raw_prob_diff", None)
+        if gap["LINE_DIFF"] < LINE_DIFF_THRESHOLD and gap["PROB_DIFF"] >= pct_threshold_val:
+            result["price_gaps"].append(gap)
+
     result["price_gaps"].sort(key=lambda x: -x["PROB_DIFF"])
     result["line_diffs"].sort(key=lambda x: (-x["LINE_DIFF"], x["PLAYERNAME"]))
 
@@ -1072,7 +1078,7 @@ def render_competitor_section(event_id: str, league_name: str, player_info: pd.D
         mid = (len(filtered_gaps) + 1) // 2
         for col_idx, chunk in enumerate([filtered_gaps[:mid], filtered_gaps[mid:]]):
             for item in chunk:
-                line_str   = f"@ {item['LINE']}" if item["LINE"] else ""
+                line_str   = f"@ {item['DK_LINE']}" if item.get("DK_LINE") else ""
                 diff_color = "#f87171" if item["PROB_DIFF"] >= 6 else "#fbbf24"
                 gap_cols[col_idx].markdown(
                     row_html(
