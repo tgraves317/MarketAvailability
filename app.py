@@ -579,7 +579,7 @@ def build_competitor_comparison(dk_prices: pd.DataFrame,
             continue
         dk_prob   = american_to_prob(dk_american)
         total_imp = dk_prob + comp_prob
-        if total_imp < 1.0:
+        if total_imp < 0.98:  # require ≥2% edge to filter out data lag noise
             profit_pct = round((1 - total_imp) * 100, 2)
             result["arbs"].append({
                 "PLAYERNAME":  player,
@@ -977,6 +977,7 @@ def render_competitor_section(event_id: str, league_name: str, player_info: pd.D
         )
 
     with st.expander(expander_title, expanded=True):
+        st.caption("DK prices from Snowflake — may lag 1-2 min. Arbs require ≥2% edge to filter data lag noise.")
 
         # ── Arbs ──────────────────────────────────────────────────────────────
         if comparison["arbs"]:
