@@ -1021,9 +1021,9 @@ def render_competitor_section(event_id: str, league_name: str, player_info: pd.D
         missing_sorted = sorted(comparison["missing_on_dk"], key=lambda x: (x["MARKET"], x["PLAYERNAME"]))
         # Build all items as pill spans
         pills = "".join(
-            "<span style='display:inline-flex;align-items:center;gap:6px;"
+            "<span style='display:inline-flex;align-items:center;justify-content:center;gap:6px;"
             "background:#2d0a0a;border:1px solid #dc2626;border-radius:6px;"
-            "padding:6px 14px;margin:4px;white-space:nowrap'>"
+            "padding:6px 14px;margin:4px;white-space:nowrap;text-align:center'>"
             "<span style='color:#fca5a5;font-weight:800;font-size:1em'>" + item["PLAYERNAME"] + "</span>"
             "<span style='color:#6b7280;font-size:0.85em'>—</span>"
             "<span style='color:#f87171;font-weight:700;font-size:1em'>" + market_short(item["MARKET"]) + "</span>"
