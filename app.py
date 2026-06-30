@@ -34,7 +34,7 @@ MLB_EXCLUDED_MARKETS = {
     "Combined Pitcher Earned Runs Allowed (X or Fewer)",
     "Combined Pitcher Strikeouts Thrown",
     "Either Pitcher Hits Allowed (X or Fewer)",
-    "Either Pitcher Earned Runs Allowed (X or Fewer)",.
+    "Either Pitcher Earned Runs Allowed (X or Fewer)",
     "Walks Allowed (X or Fewer)",
     "Hits Allowed + Walks Allowed + Earned Runs Allowed (X or Fewer)",
     "Outs O/U",
@@ -321,13 +321,27 @@ def get_player_info(event_id: str) -> pd.DataFrame:
     players["TEAM_ORDER"] = players["VENUEROLE"].map({"HomePlayer": 0, "AwayPlayer": 1}).fillna(2)
     return players[["PLAYERNAME", "TEAM", "TEAM_ORDER", "POSITION"]]
 
+@st.cache_data(ttl=30, show_spinner=False)
+def get_activity_feed(event_id: str, minutes: int = 30) -> pd.DataFrame:
+    """Markets published, removed, or frozen in the last N minutes for this event."""
+    return run_query(f"""
+        SELECT
+            mp.PLAYERNAME,
+            m.MARKETTYPENAME,
+            CASE WHEN m.ISREMOVED = TRUE THEN 'REMOVED' ELSE 'PUBLISHED' END AS ACTION,
+            GREATEST(m.FIRSTMESSAGETIMESTAMP, m.LASTMESSAGETIMESTAMP) AS CHANGED_AT
+        FROM SPORTSCONTENT.DBO.MARKETSPLAYERS_GLOBAL mp
+        JOIN SPORTSCONTENT.DBO.MARKETS m ON m.MARKETID = mp.MARKETID AND m.EVENTID = '{event_id}'
+        WHERE mp.EVENTID = '{event_id}'
+          AND GREATEST(m.FIRSTMESSAGETIMESTAMP, m.LASTMESSAGETIMESTAMP)
+              >= DATEADD('minute', -{minutes}, CURRENT_TIMESTAMP)
+        ORDER BY CHANGED_AT DESC
+    """)
+
 # ── Build helpers ─────────────────────────────────────────────────────────────
 
 def compute_group_pcts(baselines: pd.DataFrame, current: pd.DataFrame, league_name: str) -> dict:
-    """
-    Returns {group: (live, total)} using the exact same logic as the detail view.
-    Reuses already-cached baselines + current data — no extra queries.
-    """
+    """Returns {group: (live, total)}. REMOVED counts against live."""
     df = build_status_df(baselines, current, league_name)
     if df.empty:
         return {}
@@ -340,6 +354,55 @@ def compute_group_pcts(baselines: pd.DataFrame, current: pd.DataFrame, league_na
         total = int(len(grp_df))
         result[grp] = (live, total)
     return result
+
+# O/U ↔ Milestone pairing: maps each O/U market to its expected Milestone partner
+OU_MILESTONE_PAIRS = {
+    "Points O/U":                       "Points Milestones",
+    "Rebounds O/U":                     "Rebounds Milestones",
+    "Assists O/U":                      "Assists Milestones",
+    "Three Pointers Made O/U":          "Three Pointers Made Milestones",
+    "Points + Rebounds O/U":            "Points + Rebounds Milestones",
+    "Points + Assists O/U":             "Points + Assists Milestones",
+    "Rebounds + Assists O/U":           "Rebounds + Assists Milestones",
+    "Points + Rebounds + Assists O/U":  "Points + Rebounds + Assists Milestones",
+    # MLB
+    "Hits O/U":                         "Hits Milestones",
+    "Strikeouts Thrown O/U":            "Strikeouts Thrown Milestones",
+    "Earned Runs Allowed O/U":          "Earned Runs Allowed Milestones",
+    "Hits Allowed O/U":                 "Hits Allowed Milestones",
+    "Total Bases O/U":                  "Total Bases Milestones",
+    "Hits + Runs + RBIs O/U":          "Hits + Runs + RBIs Milestones",
+    "Runs + RBIs O/U":                  "Runs + RBIs Milestones",
+    "Stolen Bases O/U":                 "Stolen Bases Milestones",
+    "Singles O/U":                      "Singles Milestones",
+    "Triples O/U":                      "Triples Milestones",
+    "Walks Allowed O/U":                "Walks Allowed Milestones",
+    "Strikeouts O/U":                   "Strikeouts Milestones",
+}
+
+def get_pairing_flags(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Returns rows where a player has an O/U live but the paired Milestone
+    is missing or removed (and vice versa).
+    """
+    if df.empty:
+        return pd.DataFrame()
+    status_map = df.groupby(["PLAYERNAME", "MARKET"])["STATUS"].first().to_dict()
+    flags = []
+    for player in df["PLAYERNAME"].unique():
+        for ou, mile in OU_MILESTONE_PAIRS.items():
+            ou_status   = status_map.get((player, ou))
+            mile_status = status_map.get((player, mile))
+            # Only flag if at least one side exists in the baseline
+            if ou_status is None and mile_status is None:
+                continue
+            if ou_status == "LIVE" and mile_status != "LIVE":
+                flags.append({"PLAYERNAME": player, "MARKET": ou,
+                               "PAIRED_WITH": mile, "ISSUE": f"{ou} live but {mile} {mile_status or 'missing'}"})
+            elif mile_status == "LIVE" and ou_status != "LIVE":
+                flags.append({"PLAYERNAME": player, "MARKET": mile,
+                               "PAIRED_WITH": ou, "ISSUE": f"{mile} live but {ou} {ou_status or 'missing'}"})
+    return pd.DataFrame(flags) if flags else pd.DataFrame()
 
 def build_status_df(baselines: pd.DataFrame, current: pd.DataFrame, league_name: str,
                     player_info: pd.DataFrame = None) -> pd.DataFrame:
@@ -545,30 +608,31 @@ def render_player_cards(df: pd.DataFrame, player_info: pd.DataFrame, sport_name:
         markets   = player_df.sort_values(["GROUP", "MARKET"])
         n_live    = int((markets["STATUS"] == "LIVE").sum())
         n_missing = int((markets["STATUS"] == "MISSING").sum())
+        n_removed = int((markets["STATUS"] == "REMOVED").sum())
         n_total   = int(len(markets))
         pct       = n_live / n_total if n_total else 0
-        border    = "#dc2626" if n_missing > 0 else "#16a34a"
+        border    = "#dc2626" if n_missing > 0 else ("#b45309" if n_removed > 0 else "#16a34a")
         bar_fill  = str(int(pct * 56))
 
-        # Only show markets that are NOT published (missing only)
-        missing_markets = markets[markets["STATUS"] == "MISSING"]
+        # Only show markets that are not live (missing or removed)
+        not_live_markets = markets[markets["STATUS"] != "LIVE"]
 
-        if n_missing == 0:
+        if n_missing == 0 and n_removed == 0:
             sections = (
                 "<div style='margin-top:8px;font-size:0.72em;color:#16a34a;font-weight:600'>"
                 "All markets live ✓</div>"
             )
         else:
             sections = ""
-            for grp in [g for g in GROUP_ORDER if g in missing_markets["GROUP"].values]:
-                grp_mrkts = missing_markets[missing_markets["GROUP"] == grp]
+            for grp in [g for g in GROUP_ORDER if g in not_live_markets["GROUP"].values]:
+                grp_mrkts = not_live_markets[not_live_markets["GROUP"] == grp]
                 pills = ""
                 for _, mrow in grp_mrkts.iterrows():
                     short = market_short(str(mrow["MARKET"]))
                     pills += (
                         "<span style='display:inline-block;margin:2px 3px 2px 0;"
                         "padding:2px 7px;border-radius:3px;font-size:0.68em;font-weight:500;"
-                        "background:#dc2626;color:white;white-space:nowrap'>"
+                        "background:" + STATUS_COLOR.get(str(mrow["STATUS"]), "#6b7280") + ";color:white;white-space:nowrap'>"
                         + short + "</span>"
                     )
                 sections += (
@@ -666,30 +730,74 @@ def show_detail(event_row, league_name):
 
     st.divider()
 
-    # ── Summary counts ────────────────────────────────────────────────────────
+    # ── Load activity feed + pairing flags ───────────────────────────────────
+    try:
+        activity = get_activity_feed(event_row["EVENTID"])
+    except Exception:
+        activity = pd.DataFrame()
+
+    pair_flags = get_pairing_flags(df)
+
+    # ── Summary counts (REMOVED counts as not-live) ───────────────────────────
     filtered = df.copy()
     live    = int((filtered["STATUS"] == "LIVE").sum())
     missing = int((filtered["STATUS"] == "MISSING").sum())
     removed = int((filtered["STATUS"] == "REMOVED").sum())
+    not_live = missing + removed
     total   = int(len(filtered))
 
-    st.markdown(
-        "<div style='font-size:0.82em;margin-bottom:12px'>"
-        "<span style='color:#16a34a;font-weight:700'>" + str(live) + " live</span>  ·  "
-        "<span style='color:#dc2626;font-weight:700'>" + str(missing) + " missing</span>  ·  "
-        "<span style='color:#b45309;font-weight:700'>" + str(removed) + " removed</span>  ·  "
-        "<span style='color:#9ca3af'>" + str(total) + " total</span>"
-        "</div>",
-        unsafe_allow_html=True,
-    )
+    cols_sum = st.columns([1, 1, 1, 1, 1])
+    cols_sum[0].metric("Live",     live)
+    cols_sum[1].metric("Missing",  missing)
+    cols_sum[2].metric("Removed",  removed)
+    cols_sum[3].metric("Pair gaps", len(pair_flags))
+    cols_sum[4].metric("Total",    total)
 
-    # ── Group tabs ────────────────────────────────────────────────────────────
+    # ── Alerts: pairing flags ─────────────────────────────────────────────────
+    if not pair_flags.empty:
+        with st.expander(f"⚠️ O/U ↔ Milestone gaps ({len(pair_flags)})", expanded=True):
+            for _, row in pair_flags.iterrows():
+                st.markdown(
+                    "<div style='padding:4px 0;font-size:0.85em'>"
+                    "<span style='color:#fbbf24;font-weight:700'>" + row["PLAYERNAME"] + "</span>"
+                    "  —  " + row["ISSUE"] +
+                    "</div>",
+                    unsafe_allow_html=True,
+                )
+
+    # ── Activity feed ─────────────────────────────────────────────────────────
+    if not activity.empty:
+        PT = pytz.timezone("America/Los_Angeles")
+        activity["CHANGED_AT_PT"] = pd.to_datetime(activity["CHANGED_AT"]).dt.tz_localize("UTC").dt.tz_convert(PT)
+        with st.expander(f"📋 Recent activity — last 30 min ({len(activity)} changes)", expanded=False):
+            for _, row in activity.head(50).iterrows():
+                color  = "#16a34a" if row["ACTION"] == "PUBLISHED" else "#dc2626"
+                ts     = row["CHANGED_AT_PT"].strftime("%I:%M:%S %p")
+                st.markdown(
+                    "<div style='padding:3px 0;font-size:0.82em;display:flex;gap:12px'>"
+                    "<span style='color:#6b7280;min-width:70px'>" + ts + "</span>"
+                    "<span style='color:" + color + ";font-weight:600;min-width:80px'>" + row["ACTION"] + "</span>"
+                    "<span style='color:#e5e7eb'>" + row["PLAYERNAME"] + "  —  " + row["MARKETTYPENAME"] + "</span>"
+                    "</div>",
+                    unsafe_allow_html=True,
+                )
+
+    st.divider()
+
+    # ── Group tabs (REMOVED counts against live in label) ────────────────────
     all_groups = [g for g in GROUP_ORDER if g in df["GROUP"].unique()]
     tab_labels = []
     for g in all_groups:
-        n_miss  = int((filtered[filtered["GROUP"] == g]["STATUS"] == "MISSING").sum())
-        n_total = int((filtered["GROUP"] == g).sum())
-        label   = g + (f"  ❌ {n_miss}/{n_total}" if n_miss else f"  ✅ {n_total}")
+        grp_df  = filtered[filtered["GROUP"] == g]
+        n_miss  = int((grp_df["STATUS"] == "MISSING").sum())
+        n_rem   = int((grp_df["STATUS"] == "REMOVED").sum())
+        n_live  = int((grp_df["STATUS"] == "LIVE").sum())
+        n_total = int(len(grp_df))
+        n_bad   = n_miss + n_rem
+        if n_bad:
+            label = g + f"  ❌ {n_bad}/{n_total}"
+        else:
+            label = g + f"  ✅ {n_live}"
         tab_labels.append(label)
 
     tabs = st.tabs(tab_labels)
