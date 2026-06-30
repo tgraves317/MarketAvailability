@@ -53,9 +53,9 @@ def classify_market(name: str) -> str:
         return "Exclude"
     if "team first" in n:
         return "Team"
-    if "h2h ml" in n:
+    if "h2h" in n:
         return "Exclude"
-    if "h2h" in n or n.startswith("most "):
+    if n.startswith("most "):
         return "H2H"
     if "milestone" in n:
         return "Milestones"
@@ -685,8 +685,10 @@ def show_detail(event_row, league_name):
         "</div>",
         unsafe_allow_html=True,
     )
-    m2.metric("Live",    live)
-    m3.metric("Removed", removed)
+    m2.metric("Live", live)
+    # Only show Removed if >0; label makes clear these are pulled markets not gaps
+    if removed > 0:
+        m3.metric("Removed (pulled)", removed)
     if len(urgent_flags) > 0:
         m4.metric("Line/Mile gaps", len(urgent_flags))
     m5.metric("Total", total)
@@ -747,19 +749,21 @@ def show_detail(event_row, league_name):
     # ── Group tabs — Balanced + Milestones by default, Team/H2H hidden ────────
     all_groups = [g for g in GROUP_ORDER if g in df["GROUP"].unique()]
 
-    # Tab labels: show live/total, flag if not complete
+    # Tab labels: live/total + status badge
     tab_labels = []
     for g in all_groups:
-        grp_df  = df[df["GROUP"] == g]
-        n_live  = int((grp_df["STATUS"] == "LIVE").sum())
-        n_total = int(len(grp_df))
-        n_bad   = n_total - n_live
-        if g not in DETAIL_DEFAULT_GROUPS:
-            label = g  # no badge for secondary groups
-        elif n_bad:
-            label = g + f"  ❌ {n_live}/{n_total}"
+        grp_df   = df[df["GROUP"] == g]
+        n_live   = int((grp_df["STATUS"] == "LIVE").sum())
+        n_miss   = int((grp_df["STATUS"] == "MISSING").sum())
+        n_rem    = int((grp_df["STATUS"] == "REMOVED").sum())
+        n_total  = int(len(grp_df))
+        if n_miss:
+            badge = "  ❌"
+        elif n_rem:
+            badge = "  🟡"
         else:
-            label = g + f"  ✅ {n_live}"
+            badge = "  ✅"
+        label = g + f"{badge} {n_live}/{n_total}"
         tab_labels.append(label)
 
     # Reorder so default groups come first
@@ -783,11 +787,10 @@ def show_detail(event_row, league_name):
 
             st.markdown("<div style='height:20px'></div>", unsafe_allow_html=True)
 
-            # Issues-only toggle
-            issues_col, _ = st.columns([2, 4])
-            issues_only = issues_col.toggle("Show issues only", value=False, key=f"issues_{grp}")
-
-            st.markdown("##### Players")
+            # Players header + issues-only toggle on same line
+            p_col, t_col = st.columns([3, 2])
+            p_col.markdown("##### Players")
+            issues_only = t_col.toggle("Issues only", value=False, key=f"issues_{grp}")
             render_player_cards(grp_df, player_info, league_name, issues_only)
 
 # ── Page: Overview ────────────────────────────────────────────────────────────
