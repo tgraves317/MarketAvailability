@@ -573,16 +573,22 @@ def render_market_completion(df: pd.DataFrame, league_name: str = ""):
             )
             last_grp = grp
 
-        if int(row["MISSING"]) > 0:
-            missing_players = df[
-                (df["MARKET"] == market) & (df["STATUS"] == "MISSING")
-            ]["PLAYERNAME"].tolist()
-            last_names = ", ".join(p.split()[-1] for p in missing_players[:6])
-            if len(missing_players) > 6:
-                last_names += f" +{len(missing_players)-6}"
+        not_live = df[(df["MARKET"] == market) & (df["STATUS"] != "LIVE")]
+        if not not_live.empty:
+            parts = []
+            missing_p = not_live[not_live["STATUS"] == "MISSING"]["PLAYERNAME"].tolist()
+            removed_p = not_live[not_live["STATUS"] == "REMOVED"]["PLAYERNAME"].tolist()
+            if missing_p:
+                names = ", ".join(p.split()[-1] for p in missing_p[:6])
+                if len(missing_p) > 6: names += f" +{len(missing_p)-6}"
+                parts.append("<span style='color:#f87171'>" + names + "</span>")
+            if removed_p:
+                names = ", ".join(p.split()[-1] for p in removed_p[:6])
+                if len(removed_p) > 6: names += f" +{len(removed_p)-6}"
+                parts.append("<span style='color:#b45309'>" + names + " (removed)</span>")
             sub = (
-                "<div style='font-size:0.68em;color:#f87171;margin-top:1px;white-space:nowrap;"
-                "overflow:hidden;text-overflow:ellipsis'>" + last_names + "</div>"
+                "<div style='font-size:0.68em;margin-top:1px;white-space:nowrap;"
+                "overflow:hidden;text-overflow:ellipsis'>" + "  ·  ".join(parts) + "</div>"
             )
         else:
             sub = ""
